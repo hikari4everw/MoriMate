@@ -1,0 +1,6 @@
+{
+  "backend": {"repository": "https://github.com/Open-LLM-VTuber/Open-LLM-VTuber", "commit": "992309c0aa19845960228f880013d4685fde93b5"},
+  "desktop": {"repository": "https://github.com/Open-LLM-VTuber/Open-LLM-VTuber-Web", "commit": "d176e7df2366952e3bacbf12cf9a8b18a4315932"},
+  "imported_at": "2026-10-15",
+  "method": "Unmodified source archives imported as a baseline; upstream licenses preserved."
+}
