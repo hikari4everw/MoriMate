@@ -1,0 +1,9 @@
+{
+  "model_url": "http://127.0.0.1:8080/v1",
+  "model": ".runtime/models/Qwen3.5-9B-4bit",
+  "tts_url": "http://127.0.0.1:50021",
+  "speaker_name": "小夜/SAYO",
+  "style_name": "ノーマル",
+  "name": "Hiyori",
+  "port": 12393
+}

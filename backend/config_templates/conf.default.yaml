@@ -289,6 +289,11 @@ character_config:
     bark_tts:
       voice: 'v2/en_speaker_1'
 
+    voicevox_tts:
+      base_url: "http://127.0.0.1:50021"
+      speaker_name: "小夜/SAYO"
+      style_name: "ノーマル"
+
     edge_tts:
       # Check out doc at https://github.com/rany2/edge-tts
       # Use `edge-tts --list-voices` to list all available voices

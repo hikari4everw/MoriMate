@@ -203,38 +203,24 @@ export class WindowManager {
 
   private continueSetWindowModePet(): void {
     if (!this.window) return;
-    // Calculate the bounding rectangle that covers all connected displays.
-    // This allows the transparent pet-mode window to span across monitors,
-    // so the avatar can be dragged freely between them.
-    const displays = screen.getAllDisplays();
-    const minX = Math.min(...displays.map((d) => d.bounds.x));
-    const minY = Math.min(...displays.map((d) => d.bounds.y));
-    const maxX = Math.max(...displays.map((d) => d.bounds.x + d.bounds.width));
-    const maxY = Math.max(...displays.map((d) => d.bounds.y + d.bounds.height));
-    const combinedWidth = maxX - minX;
-    const combinedHeight = maxY - minY;
-
-    // Resize and position the window to cover the entire virtual screen
-    // so the avatar is not clipped when dragged to a second monitor.
+    // V1 keeps typed input and stop controls in a small, focusable pet window.
+    const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    const area = display.workArea;
+    const width = Math.min(380, area.width);
+    const height = Math.min(620, area.height);
     this.window.setBounds({
-      x: minX,
-      y: minY,
-      width: combinedWidth,
-      height: combinedHeight,
+      x: area.x + area.width - width - 16,
+      y: area.y + area.height - height - 16,
+      width,
+      height,
     });
-
     if (isMac) this.window.setWindowButtonVisibility(false);
     this.window.setResizable(false);
     this.window.setSkipTaskbar(true);
-    this.window.setFocusable(false);
-
+    this.window.setFocusable(true);
+    this.window.setIgnoreMouseEvents(false);
     if (isMac) {
-      this.window.setIgnoreMouseEvents(true);
-      this.window.setVisibleOnAllWorkspaces(true, {
-        visibleOnFullScreen: true,
-      });
-    } else {
-      this.window.setIgnoreMouseEvents(true, { forward: true });
+      this.window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     }
 
     this.window.webContents.send('mode-changed', 'pet');
@@ -294,7 +280,7 @@ export class WindowManager {
     }
 
     if (this.window) {
-      const shouldIgnore = this.hoveringComponents.size === 0;
+      const shouldIgnore = false; // V1: keep the pet typing and stop controls clickable.
       if (isMac) {
         this.window.setIgnoreMouseEvents(shouldIgnore);
       } else {
@@ -319,7 +305,7 @@ export class WindowManager {
       }
     } else {
       // Reapply normal behavior based on hovering components
-      const shouldIgnore = this.hoveringComponents.size === 0;
+      const shouldIgnore = false; // V1: keep the pet typing and stop controls clickable.
       if (isMac) {
         this.window?.setIgnoreMouseEvents(shouldIgnore);
       } else {

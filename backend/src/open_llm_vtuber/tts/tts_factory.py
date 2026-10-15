@@ -5,7 +5,11 @@ from .tts_interface import TTSInterface
 class TTSFactory:
     @staticmethod
     def get_tts_engine(engine_type, **kwargs) -> Type[TTSInterface]:
-        if engine_type == "azure_tts":
+        if engine_type == "voicevox_tts":
+            from .voicevox_tts import TTSEngine as VoicevoxTTSEngine
+
+            return VoicevoxTTSEngine(**kwargs)
+        elif engine_type == "azure_tts":
             from .azure_tts import TTSEngine as AzureTTSEngine
 
             return AzureTTSEngine(

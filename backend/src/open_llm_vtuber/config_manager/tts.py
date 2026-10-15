@@ -680,10 +680,22 @@ class CartesiaTTSConfig(I18nMixin):
     }
 
 
+class VoicevoxTTSConfig(I18nMixin):
+    base_url: str = "http://127.0.0.1:50021"
+    speaker_name: str = "小夜/SAYO"
+    style_name: str = "ノーマル"
+    DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
+        "base_url": Description(en="Local VOICEVOX engine URL", zh="本地 VOICEVOX 引擎地址"),
+        "speaker_name": Description(en="Installed speaker name", zh="已安装的音色名称"),
+        "style_name": Description(en="Installed style name", zh="已安装的风格名称"),
+    }
+
+
 class TTSConfig(I18nMixin):
     """Configuration for Text-to-Speech."""
 
     tts_model: Literal[
+        "voicevox_tts",
         "azure_tts",
         "bark_tts",
         "edge_tts",
@@ -704,6 +716,7 @@ class TTSConfig(I18nMixin):
         "piper_tts",
     ] = Field(..., alias="tts_model")
 
+    voicevox_tts: Optional[VoicevoxTTSConfig] = None
     azure_tts: Optional[AzureTTSConfig] = Field(None, alias="azure_tts")
     bark_tts: Optional[BarkTTSConfig] = Field(None, alias="bark_tts")
     edge_tts: Optional[EdgeTTSConfig] = Field(None, alias="edge_tts")
@@ -732,6 +745,7 @@ class TTSConfig(I18nMixin):
             en="Text-to-speech model to use", zh="要使用的文本转语音模型"
         ),
         "azure_tts": Description(en="Configuration for Azure TTS", zh="Azure TTS 配置"),
+        "voicevox_tts": Description(en="Configuration for VOICEVOX", zh="VOICEVOX 配置"),
         "bark_tts": Description(en="Configuration for Bark TTS", zh="Bark TTS 配置"),
         "edge_tts": Description(en="Configuration for Edge TTS", zh="Edge TTS 配置"),
         "cosyvoice_tts": Description(

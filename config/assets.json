@@ -1,0 +1,10 @@
+{
+  "models": {
+    "9b": {"repo":"mlx-community/Qwen3.5-9B-4bit","revision":"8b2b98c00a6b4d291155e4890773ca8f769aee53","directory":"Qwen3.5-9B-4bit"},
+    "qwen3": {"repo":"mlx-community/Qwen3-8B-4bit","revision":"545dc4251c05440727734bcd94334791f6ab0192","directory":"Qwen3-8B-4bit"},
+    "27b": {"repo":"mlx-community/Qwen3.5-27B-4bit","revision":"45797d2985a12c55e6473686e9ea91b95e959553","directory":"Qwen3.5-27B-4bit"}
+  },
+  "hiyori": {"url":"https://codeload.github.com/Live2D/CubismWebSamples/tar.gz/b1de66b0b1f1cb881d95fb6158622aeb6a2827bd","prefix":"CubismWebSamples-b1de66b0b1f1cb881d95fb6158622aeb6a2827bd/Samples/Resources/Hiyori/"},
+  "sayo": {"url":"https://github.com/VOICEVOX/voicevox_engine/releases/download/0.25.2/voicevox_engine-macos-arm64-0.25.2.7z.001","directory":"voicevox"},
+  "mao": {"url":"https://github.com/Aivis-Project/AivisSpeech-Engine/releases/download/1.2.0/AivisSpeech-Engine-macOS-arm64-1.2.0.7z.001","directory":"aivis","model_uuid":"a59cb814-0083-4369-8542-f51a29e72af7"}
+}
