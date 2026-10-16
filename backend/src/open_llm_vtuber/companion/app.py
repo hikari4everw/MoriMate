@@ -22,8 +22,10 @@ ROOT = Path(__file__).resolve().parents[4]
 
 
 def allowed_origin(origin):
-    if origin in (None, "null", "file://"):
-        return True  # Electron file renderer / native client.
+    if origin is None:
+        return True  # Native loopback clients do not send Origin.
+    if origin in {"null", "file://"}:
+        return False
     parsed = urlparse(origin)
     return (
         parsed.scheme == "http"
@@ -50,13 +52,21 @@ def region(value):
 def create_app(root=ROOT, model=None, voice=None, capture=None):
     config = json.loads((root / "config/companion.json").read_text())
     config["model"] = os.environ.get("COMPANION_MODEL", config["model"])
-    config["voice_label"] = "VOICEVOX:小夜/SAYO"
+    config["voice_label"] = config.get("voice_label", "VOICEVOX:小夜/SAYO")
     if os.environ.get("COMPANION_VOICE") == "mao":
         config.update(
             tts_url="http://127.0.0.1:10101",
             speaker_name="まお",
             style_name="ノーマル",
             voice_label="AivisSpeech:まお",
+        )
+
+    if os.environ.get("COMPANION_VOICE") == "sayo":
+        config.update(
+            tts_url="http://127.0.0.1:50021",
+            speaker_name="小夜/SAYO",
+            style_name="ノーマル",
+            voice_label="VOICEVOX:小夜/SAYO",
         )
 
     @asynccontextmanager
@@ -70,8 +80,6 @@ def create_app(root=ROOT, model=None, voice=None, capture=None):
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
-            "null",
-            "file://",
             "http://127.0.0.1:12393",
             "http://localhost:5173",
             "http://127.0.0.1:5173",
@@ -120,6 +128,7 @@ def create_app(root=ROOT, model=None, voice=None, capture=None):
         last_activity = time.monotonic()
         latest = None
         observer_task = None
+        capture_task = None
 
         async def status():
             await send(
@@ -146,7 +155,7 @@ def create_app(root=ROOT, model=None, voice=None, capture=None):
             await send({"type": "memories", "items": runtime.store.memories()})
 
         async def observe():
-            nonlocal observing, latest
+            nonlocal observing, latest, playing
             try:
                 while observing:
                     snap = await capture.capture(selected, dialogue_region)
@@ -161,6 +170,9 @@ def create_app(root=ROOT, model=None, voice=None, capture=None):
                         min((line["confidence"] for line in lines), default=0),
                     )
                     if accepted:
+                        if runtime.is_proactive:
+                            await runtime.stop()
+                            playing = False
                         runtime.store.add_source("observation", accepted, runtime.scene)
                         latest = (accepted, now)
                         await send({"type": "observation", "text": accepted})
@@ -213,6 +225,27 @@ def create_app(root=ROOT, model=None, voice=None, capture=None):
                     await observer_task
                 observer_task = None
 
+        async def cancel_capture():
+            nonlocal capture_task
+            if capture_task:
+                capture_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await capture_task
+                capture_task = None
+
+        async def launch_capture(operation):
+            nonlocal capture_task
+            await cancel_capture()
+
+            async def run():
+                try:
+                    await operation()
+                    await status()
+                except (ValueError, RuntimeError, OSError) as exc:
+                    await send({"type": "error", "message": str(exc)})
+
+            capture_task = asyncio.create_task(run())
+
         maintenance_task = asyncio.create_task(maintenance_loop())
         try:
             await status()
@@ -221,6 +254,17 @@ def create_app(root=ROOT, model=None, voice=None, capture=None):
                 data = await ws.receive_json()
                 kind = data.get("type")
                 try:
+                    if kind in {
+                        "text-input",
+                        "interrupt-signal",
+                        "observe-stop",
+                        "observe-start",
+                        "daily",
+                        "memory-delete",
+                        "memory-edit",
+                        "scene-clear",
+                    } or (kind == "settings" and data.get("muted")):
+                        await cancel_capture()
                     if kind == "text-input":
                         text = str(data.get("text", "")).strip()
                         if not text or len(text) > 4000:
@@ -234,6 +278,9 @@ def create_app(root=ROOT, model=None, voice=None, capture=None):
                         playing = False
                         latest = None
                         await runtime.stop()
+                    elif kind == "stop-speech":
+                        await runtime.stop_speech()
+                        playing = False
                     elif kind == "audio-play-start":
                         if data.get("turn_id") == runtime.turn_id:
                             playing = True
@@ -246,7 +293,7 @@ def create_app(root=ROOT, model=None, voice=None, capture=None):
                         if "muted" in data:
                             runtime.muted = bool(data["muted"])
                             if runtime.muted:
-                                await runtime.stop()
+                                await runtime.stop_speech()
                                 playing = False
                         if "proactive" in data:
                             gate.enabled = bool(data["proactive"])
@@ -259,16 +306,28 @@ def create_app(root=ROOT, model=None, voice=None, capture=None):
                                 raise ValueError("发言档位无效")
                             gate.intensity = data["intensity"]
                     elif kind == "windows":
-                        await send(
-                            {"type": "windows", "items": await capture.windows()}
-                        )
+
+                        async def list_windows():
+                            await send(
+                                {"type": "windows", "items": await capture.windows()}
+                            )
+
+                        await launch_capture(list_windows)
                     elif kind == "preview":
                         await stop_observing()
-                        selected = int(data["window"])
+                        await runtime.stop()
+                        playing = False
+                        requested_window = int(data["window"])
+                        selected = None
                         dialogue_region = game_region = None
-                        await send(
-                            {"type": "preview", **await capture.capture(selected)}
-                        )
+
+                        async def preview_window(window=requested_window):
+                            nonlocal selected
+                            snap = await capture.capture(window)
+                            selected = window
+                            await send({"type": "preview", **snap})
+
+                        await launch_capture(preview_window)
                     elif kind == "observe-start":
                         if selected is None:
                             raise ValueError("请先选择并预览窗口")
@@ -288,8 +347,9 @@ def create_app(root=ROOT, model=None, voice=None, capture=None):
                         await history()
                     elif kind == "observe-stop":
                         await stop_observing()
-                        await runtime.stop()
-                        playing = False
+                        if runtime.is_proactive:
+                            await runtime.stop()
+                            playing = False
                     elif kind == "daily":
                         await stop_observing()
                         await runtime.stop()
@@ -306,11 +366,15 @@ def create_app(root=ROOT, model=None, voice=None, capture=None):
                         last_activity = time.monotonic()
                         await runtime.stop()
                         playing = False
-                        snap = await capture.capture(selected, game_region)
-                        await runtime.start(
-                            "看看当前画面，结合已读到的对白说一句感受。",
-                            image=snap["image"],
-                        )
+
+                        async def look_at_window(window=selected, crop=game_region):
+                            snap = await capture.capture(window, crop)
+                            await runtime.start(
+                                "看看当前画面，结合已读到的对白说一句感受。",
+                                image=snap["image"],
+                            )
+
+                        await launch_capture(look_at_window)
                     elif kind in {"memory-delete", "memory-edit", "scene-clear"}:
                         await runtime.stop()
                         playing = False
@@ -334,6 +398,7 @@ def create_app(root=ROOT, model=None, voice=None, capture=None):
             # TestClient and ASGI shutdown can cancel the handler during cleanup.
             with anyio.CancelScope(shield=True):
                 try:
+                    await cancel_capture()
                     await stop_observing()
                     maintenance_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):

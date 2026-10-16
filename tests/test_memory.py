@@ -61,3 +61,18 @@ def test_deletion_invalidates_summary_of_assistant_paraphrase(tmp_path):
     store.forget(item)
     assert store.summary("daily") is None
     assert store.sources() == []
+
+
+def test_legacy_corrected_memory_with_lost_scope_is_quarantined(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "CREATE TABLE memories (id INTEGER PRIMARY KEY, kind TEXT, text TEXT, source_ids TEXT, evidence TEXT, origin TEXT)"
+        )
+        db.execute(
+            "INSERT INTO memories VALUES(1,'experience','旧游戏纠正记忆','[]','用户直接修改','user_edit')"
+        )
+    store = MemoryStore(path)
+    assert store.memories()[0]["scene"] == "unknown"

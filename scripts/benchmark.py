@@ -58,7 +58,7 @@ async def main(args):
 
         runtime = CompanionRuntime(
             store,
-            LocalModel("http://127.0.0.1:8080/v1", args.model),
+            LocalModel("http://127.0.0.1:18080/v1", args.model),
             TTSEngine(
                 base_url=args.voice_url,
                 speaker_name=args.speaker,

@@ -32,17 +32,38 @@ def wait_ready(url, process, timeout=120):
 
 def main():
     parser = argparse.ArgumentParser(description="启动本地 Hiyori；不连接付费 API")
-    parser.add_argument("--model", choices=MODELS, default="9b")
-    parser.add_argument("--voice", choices=["sayo", "mao"], default="sayo")
-    parser.add_argument(
-        "--web", action="store_true", help="仅服务；手动打开 http://127.0.0.1:12393"
+    parser.add_argument("--model", choices=MODELS, default="27b")
+    parser.add_argument("--voice", choices=["sayo", "mao"], default="mao")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--web", dest="web", action="store_true", help="浏览器模式（默认）"
     )
+    mode.add_argument(
+        "--desktop",
+        dest="web",
+        action="store_false",
+        help="原生模式，须通过 macOS 安全验证",
+    )
+    parser.set_defaults(web=True)
     args = parser.parse_args()
     os.chdir(ROOT)
+    if not args.web:
+        desktop_app = ROOT / "desktop/node_modules/electron/dist/Electron.app"
+        if not desktop_app.exists():
+            parser.error("Electron 不存在；请使用 --web 启动浏览器版")
+        assessment = subprocess.run(
+            ["/usr/sbin/spctl", "--assess", "--type", "execute", str(desktop_app)],
+            capture_output=True,
+            text=True,
+        )
+        if assessment.returncode:
+            parser.error(
+                "Electron 未通过 macOS 安全验证；请使用 --web。未启动模型或语音服务。"
+            )
     model = ".runtime/models/" + MODELS[args.model]
     if not Path(model, "config.json").exists():
         parser.error("模型未下载，请先运行 scripts/setup.sh --model " + args.model)
-    ports = [8080, 12393, 50021 if args.voice == "sayo" else 10101]
+    ports = [18080, 12393, 50021 if args.voice == "sayo" else 10101]
     for port in ports:
         with socket.socket() as s:
             if s.connect_ex(("127.0.0.1", port)) == 0:
@@ -122,7 +143,7 @@ def main():
                 "--host",
                 "127.0.0.1",
                 "--port",
-                "8080",
+                "18080",
             ]
             + (
                 ["--chat-template-args", '{"enable_thinking":false}']
@@ -131,7 +152,7 @@ def main():
             ),
             "mlx",
         )
-        wait_ready("http://127.0.0.1:8080/v1/models", model_process, 180)
+        wait_ready("http://127.0.0.1:18080/v1/models", model_process, 180)
         backend = launch([".venv/bin/python", "backend/run_companion.py"], "backend")
         wait_ready("http://127.0.0.1:12393/health", backend)
         print(

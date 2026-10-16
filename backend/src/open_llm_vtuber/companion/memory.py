@@ -32,6 +32,18 @@ class MemoryStore:
             self.db.execute("ALTER TABLE sources ADD COLUMN speech TEXT")
             self.db.commit()
 
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(memories)")}
+        if "scene" not in columns:
+            with self.db:
+                self.db.execute("ALTER TABLE memories ADD COLUMN scene TEXT")
+                for memory in self.memories():
+                    if memory["origin"] in {"observation", "user_edit"}:
+                        rows = self._valid_sources(json.loads(memory["source_ids"]))
+                        self.db.execute(
+                            "UPDATE memories SET scene=? WHERE id=?",
+                            (rows[0]["scene"] if rows else "unknown", memory["id"]),
+                        )
+
     def close(self):
         self.db.close()
 
@@ -85,16 +97,20 @@ class MemoryStore:
             return None
         if not any(evidence in r["text"] for r in rows):
             return None
+        origin = "user" if all(r["kind"] == "user" for r in rows) else "observation"
+        scenes = {r["scene"] for r in rows}
+        if origin == "observation" and len(scenes) != 1:
+            return None
+        scene = rows[0]["scene"] if origin == "observation" else None
         duplicate = self.db.execute(
-            "SELECT id FROM memories WHERE text=?", (text,)
+            "SELECT id FROM memories WHERE text=? AND scene IS ?", (text, scene)
         ).fetchone()
         if duplicate:
             return duplicate["id"]
-        origin = "user" if all(r["kind"] == "user" for r in rows) else "observation"
         with self.db:
             cur = self.db.execute(
-                "INSERT INTO memories(kind,text,source_ids,evidence,origin) VALUES(?,?,?,?,?)",
-                (kind, text, json.dumps(source_ids), evidence, origin),
+                "INSERT INTO memories(kind,text,source_ids,evidence,origin,scene) VALUES(?,?,?,?,?,?)",
+                (kind, text, json.dumps(source_ids), evidence, origin, scene),
             )
         return cur.lastrowid
 
@@ -146,14 +162,22 @@ class MemoryStore:
             raise ValueError("记忆需为 1–600 字")
         with self.db:
             row = self.db.execute(
-                "SELECT kind FROM memories WHERE id=?", (item_id,)
+                "SELECT kind,scene FROM memories WHERE id=?", (item_id,)
             ).fetchone()
             if not row:
                 raise KeyError(item_id)
             self._redact_dependencies(item_id)
             self.db.execute(
-                "INSERT OR REPLACE INTO memories VALUES(?,?,?,?,?,?)",
-                (item_id, row["kind"], text.strip(), "[]", "用户直接修改", "user_edit"),
+                "INSERT OR REPLACE INTO memories(id,kind,text,source_ids,evidence,origin,scene) VALUES(?,?,?,?,?,?,?)",
+                (
+                    item_id,
+                    row["kind"],
+                    text.strip(),
+                    "[]",
+                    "用户直接修改",
+                    "user_edit",
+                    row["scene"],
+                ),
             )
 
     def save_summary(self, scene: str, text: str, source_ids: list[int]) -> str | None:
@@ -180,6 +204,7 @@ class MemoryStore:
 
     def clear_scene(self, scene: str):
         with self.db:
+            self.db.execute("DELETE FROM memories WHERE scene=?", (scene,))
             ids = {
                 r["id"]
                 for r in self.db.execute(

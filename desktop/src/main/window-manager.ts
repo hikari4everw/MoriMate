@@ -132,7 +132,7 @@ export class WindowManager {
     if (is.dev && process.env.ELECTRON_RENDERER_URL) {
       this.window.loadURL(process.env.ELECTRON_RENDERER_URL);
     } else {
-      this.window.loadFile(join(__dirname, '../renderer/index.html'));
+      this.window.loadURL('http://127.0.0.1:12393');
     }
   }
 

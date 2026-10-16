@@ -1,9 +1,10 @@
 {
-  "model_url": "http://127.0.0.1:8080/v1",
-  "model": ".runtime/models/Qwen3.5-9B-4bit",
-  "tts_url": "http://127.0.0.1:50021",
-  "speaker_name": "小夜/SAYO",
+  "model_url": "http://127.0.0.1:18080/v1",
+  "model": ".runtime/models/Qwen3.5-27B-4bit",
+  "tts_url": "http://127.0.0.1:10101",
+  "speaker_name": "まお",
   "style_name": "ノーマル",
   "name": "Hiyori",
-  "port": 12393
+  "port": 12393,
+  "voice_label": "AivisSpeech:まお"
 }

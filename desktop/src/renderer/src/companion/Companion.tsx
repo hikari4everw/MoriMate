@@ -15,7 +15,7 @@ type Region = [number, number, number, number];
 type History = { id: number; kind: string; text: string };
 type Memory = { id: number; kind: string; text: string; evidence: string; origin: string };
 type WindowItem = { id: number; app: string; title: string };
-type AudioPacket = { turn_id: number; audio: string | null; display_text: { text: string }; tts_text: string; actions?: { expressions?: string[] } };
+type AudioPacket = { turn_id: number; audio: string | null; display_text: { text: string }; tts_text: string; expires_at_ms?: number; actions?: { expressions?: string[] } };
 type Status = { observing: boolean; muted: boolean; proactive: boolean; intensity: string; scene: string;
   voice_label?: string; model?: string; metrics: { first_audio_seconds: number }[]; summary?: { text: string } };
 
@@ -48,6 +48,8 @@ function Companion() {
   const [tab, setTab] = useState('chat');
   const socket = useRef<WebSocket | null>(null);
   const player = useRef<TurnPlayer<AudioPacket> | null>(null);
+  const silent = useRef(false);
+  const muted = useRef(false);
   const cropStart = useRef<[number, number] | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const send = (data: object) => {
@@ -68,18 +70,18 @@ function Companion() {
       model?.setExpression?.('neutral');
     };
     const queue = new TurnPlayer<AudioPacket>(async (packet, current) => {
-      if (!current()) return;
+      if (!current() || (packet.expires_at_ms && Date.now() >= packet.expires_at_ms)) return;
       setSubtitle(packet.display_text.text);
       setJapanese(packet.tts_text);
       setHistory(items => [...items, { id: Date.now(), kind: 'assistant', text: packet.display_text.text }]);
       const model = (window as any).getLive2DManager?.()?.getModel(0);
       model?.setExpression?.(packet.actions?.expressions?.[0] || 'neutral');
-      if (!packet.audio) return;
+      if (!packet.audio || silent.current || muted.current) return;
       const url = `data:audio/wav;base64,${packet.audio}`;
       // A private WAV decoder per sentence prevents late loads from reviving canceled lip motion.
       const wav = new LAppWavFileHandler();
       await wav.loadWavFile(url);
-      if (!current()) { wav.releasePcmData(); return; }
+      if (!current() || (packet.expires_at_ms && Date.now() >= packet.expires_at_ms)) { wav.releasePcmData(); return; }
       if (model) model._wavFileHandler = wav;
       await new Promise<void>((resolve, reject) => {
         const audio = new Audio(url);
@@ -110,10 +112,11 @@ function Companion() {
     const connect = () => {
       const ws = new WebSocket(`${BASE.replace('http', 'ws')}/client-ws`);
       socket.current = ws;
-      ws.onopen = () => { setConnected(true); setError(''); };
+      ws.onopen = () => { queue.resetSession(); setConnected(true); setError(''); };
       ws.onmessage = event => {
+        if (socket.current !== ws) return;
         const data = JSON.parse(event.data);
-        if (data.type === 'status') setStatus(data);
+        if (data.type === 'status') { setStatus(data); muted.current = data.muted; }
         if (data.type === 'history') setHistory(data.items.filter((i: History) => i.kind !== 'observation'));
         if (data.type === 'memories') setMemories(data.items);
         if (data.type === 'windows') setWindows(data.items);
@@ -121,12 +124,14 @@ function Companion() {
         if (data.type === 'observation') setOcr(data.text);
         if (data.type === 'error') setError(data.message);
         if (data.type === 'memory-updated') send({ type: 'memories' });
+        if (data.type === 'speech-stopped') { silent.current = true; queue.cancelPlayback(); }
         if (data.type === 'interrupt-signal') { queue.stop(); setBusy(false); }
-        if (data.type === 'control' && data.text === 'conversation-chain-start') { queue.begin(data.turn_id); setBusy(true); }
+        if (data.type === 'control' && data.text === 'conversation-chain-start') { silent.current = false; queue.begin(data.turn_id); setBusy(true); }
         if (data.type === 'control' && data.text === 'conversation-chain-end') queue.end(data.turn_id);
         if (data.type === 'audio') queue.enqueue(data.turn_id, data);
       };
       ws.onclose = () => {
+        if (socket.current !== ws) return;
         queue.stop(); setConnected(false); setBusy(false);
         setStatus(old => ({ ...old, observing: false }));
         if (!disposed) reconnect = setTimeout(connect, 2500);
@@ -139,6 +144,7 @@ function Companion() {
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [history]);
   useEffect(() => { document.body.classList.toggle('pet-view', mode === 'pet'); }, [mode]);
   const stop = () => { player.current?.stop(); setBusy(false); send({ type: 'interrupt-signal' }); };
+  const stopSpeech = () => { silent.current = true; player.current?.cancelPlayback(); send({ type: 'stop-speech' }); };
   const submit = () => {
     const text = input.trim();
     if (!text || !connected) return;
@@ -186,10 +192,10 @@ function Companion() {
       </div>}
       {tab === 'memory' && <div className="settings scroll"><p>记忆只从明确来源整理。纠正或删除会同时作废关联摘要与历史，避免旧内容重新出现。</p><button onClick={() => send({ type: 'memories' })}>刷新记忆</button>{memories.length === 0 && <p>还没有长期记忆；聊几轮后会在空闲时整理。</p>}{memories.map(memory => <MemoryCard key={`${memory.id}-${memory.text}`} memory={memory} send={send} />)}<hr /><button onClick={() => { if (window.confirm('清除当前场景的对话、摘要和关联记忆？')) send({ type: 'scene-clear' }); }}>清除当前场景记录</button></div>}
       <div className="controls">
-        <button onClick={() => { player.current?.stop(); send({ type: 'observe-stop' }); }} disabled={!status.observing}>停止观察</button>
+        <button onClick={() => { send({ type: 'observe-stop' }); }} disabled={!status.observing}>停止观察</button>
         <button onClick={() => settings({ proactive: !status.proactive })}>{status.proactive ? '禁止主动发言' : '允许主动发言'}</button>
-        <button onClick={() => { if (!status.muted) player.current?.stop(); settings({ muted: !status.muted }); }}>{status.muted ? '恢复声音' : '静音'}</button>
-        <button onClick={stop}>停止当前语音</button>
+        <button onClick={() => { if (!status.muted) { silent.current = true; player.current?.cancelPlayback(); } settings({ muted: !status.muted }); }}>{status.muted ? '恢复声音' : '静音'}</button>
+        <button onClick={stopSpeech}>停止当前语音</button>
       </div>
       {error && <div role="alert" className="error" onClick={() => setError('')}>{error}</div>}
       <form onSubmit={e => { e.preventDefault(); submit(); }}><input aria-label="输入中文消息" value={input} maxLength={4000} onChange={e => setInput(e.target.value)} placeholder="想聊点什么？" /><button className="primary" disabled={!connected || !input.trim()}>发送</button></form>

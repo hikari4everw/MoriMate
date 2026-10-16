@@ -70,3 +70,39 @@ def test_origin_and_region_reject_untrusted_inputs():
     for value in [[0, 0, 0, 1], [0.9, 0, 0.2, 1], ["1", 0, 1, 1]]:
         with pytest.raises(ValueError):
             region(value)
+
+
+def test_opaque_browser_origin_cannot_read_local_data(tmp_path):
+    from starlette.websockets import WebSocketDisconnect
+
+    with make_client(tmp_path) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/client-ws", headers={"origin": "null"}):
+                pass
+
+
+def test_slow_preview_does_not_block_stop(tmp_path):
+    import asyncio
+    import threading
+
+    entered, cancelled = threading.Event(), threading.Event()
+
+    class SlowCapture(Capture):
+        async def capture(self, *args):
+            entered.set()
+            try:
+                await asyncio.sleep(60)
+            finally:
+                cancelled.set()
+
+    client = make_client(tmp_path)
+    # Re-create with a blocking capture, keeping the same test configuration.
+    client = TestClient(
+        create_app(tmp_path, model=Model(), voice=object(), capture=SlowCapture())
+    )
+    with client, client.websocket_connect("/client-ws") as ws:
+        until(ws, "memories")
+        ws.send_json({"type": "preview", "window": 123})
+        assert entered.wait(1)
+        ws.send_json({"type": "observe-stop"})
+        assert cancelled.wait(1), "stop must cancel preview without waiting for capture"

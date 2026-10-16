@@ -20,8 +20,8 @@ def fetch(url, path):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--model", choices=["9b", "27b", "qwen3"], default="9b")
-    p.add_argument("--voice", choices=["sayo", "mao"], default="sayo")
+    p.add_argument("--model", choices=["9b", "27b", "qwen3"], default="27b")
+    p.add_argument("--voice", choices=["sayo", "mao"], default="mao")
     args = p.parse_args()
     assets = json.loads((ROOT / "config/assets.json").read_text())
     downloads = ROOT / ".runtime/downloads"

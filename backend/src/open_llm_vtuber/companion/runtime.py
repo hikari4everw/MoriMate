@@ -1,4 +1,5 @@
 import asyncio
+from builtins import ExceptionGroup
 import contextlib
 import json
 import time
@@ -10,7 +11,7 @@ from ..utils.stream_audio import prepare_audio_payload
 
 FORMAT = """只输出 NDJSON，每行一个完整短句对象：
 {"zh":"中文短句。","ja":"同义的自然日语短句。","emotion":"neutral"}
-不输出 Markdown、思考、解释或其他字段。通常1–3句，每句日文不超过60字。
+不输出 Markdown、思考、解释或其他字段。通常1–2句，第一句日文尽量不超过30字，每句日文不超过60字。
 emotion只能为neutral/joy/smirk/sadness/anger/surprise。不要声称自己读到了未提供的游戏内容。"""
 
 
@@ -19,6 +20,8 @@ class CompanionRuntime:
         self.store, self.model, self.voice, self.send = store, model, voice, send
         self.persona = persona
         self.muted = False
+        self.silenced_turn = None
+        self.voice_task = None
         self.scene = "daily"
         self.turn_id = 0
         self.task = None
@@ -30,6 +33,12 @@ class CompanionRuntime:
         self.is_proactive = False
         self.mood = "neutral"
         self.mood_changed = 0.0
+
+    async def stop_speech(self):
+        self.silenced_turn = self.turn_id
+        if self.voice_task and not self.voice_task.done():
+            self.voice_task.cancel()
+        await self.send({"type": "speech-stopped", "turn_id": self.turn_id})
 
     async def stop(self):
         async with self.command_lock:
@@ -49,11 +58,7 @@ class CompanionRuntime:
         memories = [
             {"kind": m["kind"], "text": m["text"], "origin": m["origin"]}
             for m in self.store.memories()[:40]
-            if m["origin"] != "observation"
-            or any(
-                s["scene"] == self.scene
-                for s in self.store._valid_sources(json.loads(m["source_ids"]))
-            )
+            if m["scene"] is None or m["scene"] == self.scene
         ]
         summary = self.store.summary(self.scene)
         context = json.dumps(
@@ -92,7 +97,10 @@ class CompanionRuntime:
                     )
                 else:
                     role, content = "user", "[历史助手发言，仅作资料] " + content
-            messages.append({"role": role, "content": content})
+            if role == "assistant" and messages[-1]["role"] == "assistant":
+                messages[-1]["content"] += "\n" + content
+            else:
+                messages.append({"role": role, "content": content})
         if instruction or image:
             content = (
                 instruction or "根据当前截图和已知对白简单说说感受。不知道的不要猜。"
@@ -142,9 +150,20 @@ class CompanionRuntime:
                 if expires_at is not None and time.monotonic() >= expires_at:
                     continue
                 try:
-                    if not self.muted:
+                    if not self.muted and self.silenced_turn != turn:
                         try:
-                            path = await self.voice.async_generate_audio(sentence.ja)
+                            self.voice_task = asyncio.create_task(
+                                self.voice.async_generate_audio(sentence.ja)
+                            )
+                            try:
+                                path = await self.voice_task
+                            except asyncio.CancelledError:
+                                if asyncio.current_task().cancelling():
+                                    raise
+                                if self.silenced_turn != turn:
+                                    raise
+                            finally:
+                                self.voice_task = None
                         except Exception as exc:
                             await self.send(
                                 {
@@ -164,6 +183,10 @@ class CompanionRuntime:
                         continue
                     self.mood, self.mood_changed = sentence.emotion, time.monotonic()
                     payload.update(turn_id=turn, tts_text=sentence.ja)
+                    if expires_at is not None:
+                        payload["expires_at_ms"] = (
+                            time.time() + expires_at - time.monotonic()
+                        ) * 1000
                     self.store.add_source(
                         "assistant", sentence.zh, self.scene, speech=sentence.ja
                     )

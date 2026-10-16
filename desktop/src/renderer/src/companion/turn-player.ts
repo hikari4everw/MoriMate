@@ -19,11 +19,23 @@ export class TurnPlayer<T> {
     this.error = error;
   }
 
+  resetSession() {
+    this.stop();
+    this.lastTurn = -1;
+  }
+
   begin(turn: number) {
     if (turn <= this.lastTurn) return;
     this.stop();
     this.turn = turn;
     this.lastTurn = turn;
+  }
+
+  cancelPlayback() {
+    this.epoch += 1;
+    this.running = false;
+    this.cancel();
+    void this.drain();
   }
 
   stop() {
