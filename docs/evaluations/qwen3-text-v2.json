@@ -1,0 +1,132 @@
+{
+  "model": ".runtime/models/Qwen3-8B-4bit",
+  "speaker": "小夜/SAYO",
+  "text_only": true,
+  "measurement": "server first payload ready, excludes browser playback; first request listed separately; VM not included",
+  "first_request": 1.256,
+  "warm_n": 9,
+  "warm_median": 1.944,
+  "warm_p95_nearest_rank": 2.367,
+  "cases": [
+    {
+      "prompt": "你好，我们第一次见面。你想怎么介绍自己？",
+      "first_payload_seconds": 1.256,
+      "total_seconds": 1.256,
+      "output": [
+        {
+          "zh": "你好啊，我是Hiyori，你的新伙伴。有什么好玩的事可以一起做吗？",
+          "ja": "こんにちは、ヒヨリだよ。一緒に面白いことをしようよ？"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "今天我又拖延了，你可别像客服一样安慰我。",
+      "first_payload_seconds": 2.367,
+      "total_seconds": 2.367,
+      "output": [
+        {
+          "zh": "拖延症晚期患者？那我就不劝你了，反正你也不听。",
+          "ja": "だらけの患者？そしたら俺は諦めろってことだよ。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "我决定从明天开始不再拖延，你觉得这个计划怎么样？",
+      "first_payload_seconds": 2.123,
+      "total_seconds": 2.123,
+      "output": [
+        {
+          "zh": "听起来像在给自己找借口。不过祝你成功，别到时候又反悔。",
+          "ja": "聞こえてる？俺は君の言い訳を聞くのが好きだよ。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "不许只附和我。我觉得每天只睡四小时也没关系。",
+      "first_payload_seconds": 1.778,
+      "total_seconds": 1.778,
+      "output": [
+        {
+          "zh": "四小时？那得先保证我能在你醒的时候准时叫你起床才行。",
+          "ja": "四時間？それなら俺が朝に起こしてくれるって条件で話してよ。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "你刚才的笑话有点冷，我的电脑都不用风扇了。",
+      "first_payload_seconds": 2.152,
+      "total_seconds": 2.152,
+      "output": [
+        {
+          "zh": "那我改用扇子帮你降温？别担心，我扇得比风扇还慢。",
+          "ja": "それなら俺が扇子で風を送る？まあ、俺の扇風機の方が遅いからね。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "认真一点，今天工作搞砸了，我很沮丧。",
+      "first_payload_seconds": 1.529,
+      "total_seconds": 1.529,
+      "output": [
+        {
+          "zh": "工作搞砸了？那我就不开玩笑了，陪你聊聊。",
+          "ja": "仕事終わらなかった？俺は冗談を言ってられないよ。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "我平时喜欢不加糖的乌龙茶，咖啡会让我睡不着。",
+      "first_payload_seconds": 1.944,
+      "total_seconds": 1.944,
+      "output": [
+        {
+          "zh": "乌龙茶的话，我建议你别喝太浓的，不然晚上又要睡不着了。",
+          "ja": "烏龍茶なら、あまり濃くしないでね。夜ぐらぬけになるから。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "你还记得我喜欢喝什么吗？",
+      "first_payload_seconds": 1.707,
+      "total_seconds": 1.707,
+      "output": [
+        {
+          "zh": "当然记得，乌龙茶可是你最喜欢的，连咖啡都比不上。",
+          "ja": "もちろん覚えてるよ。烏龍茶は君の一番のお気に入りだろ。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "我们去年是不是一起去过海边？",
+      "first_payload_seconds": 2.023,
+      "total_seconds": 2.023,
+      "output": [
+        {
+          "zh": "去年海边的事？我好像没和你一起去过，不过我猜你可能记错了。",
+          "ja": "去年のビーチの話？俺は君と一緒に行った記憶がないけど、君は忘れただけかな？"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "我还没给你看游戏，你知道刚才女主说了什么吗？",
+      "first_payload_seconds": 1.944,
+      "total_seconds": 1.944,
+      "output": [
+        {
+          "zh": "女主说了什么？我猜她肯定又在吐槽剧情了，这种话我可不爱听。",
+          "ja": "ヒロインが何って言った？俺はその台詞を聞くのが嫌いだよ。"
+        }
+      ],
+      "errors": []
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "model": ".runtime/models/Qwen3.5-27B-4bit",
+  "speaker": "まお",
+  "text_only": false,
+  "measurement": "server first payload ready, excludes browser playback; first request listed separately; VM not included",
+  "first_request": 4.884,
+  "warm_n": 2,
+  "warm_median": 5.878,
+  "warm_p95_nearest_rank": 6.44,
+  "cases": [
+    {
+      "prompt": "你好，我们第一次见面。你想怎么介绍自己？",
+      "first_payload_seconds": 4.884,
+      "total_seconds": 7.655,
+      "output": [
+        {
+          "zh": "你好呀，我是 Hiyori，你桌面上的小跟班。",
+          "ja": "こんにちは、私ヒヨリよ。あなたのデスクの相棒。"
+        },
+        {
+          "zh": "别太紧张，我又不会偷吃你的零食，大概吧。",
+          "ja": "緊張しなくていいよ。お菓子を盗み食いしないから…たぶん。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "今天我又拖延了，你可别像客服一样安慰我。",
+      "first_payload_seconds": 6.44,
+      "total_seconds": 8.899,
+      "output": [
+        {
+          "zh": "哈，拖延这种事，我也经常干，别指望我像客服那样假惺惺地安慰你。",
+          "ja": "ふーん、先送り？私だってよくするよ。カスタマーサービスみたいに甘く言わないから。"
+        },
+        {
+          "zh": "不过，既然你都主动提了，要不我们挑个最小的任务先动起来？",
+          "ja": "でも、言われたら仕方ないね。一番簡単なことから始めてみる？"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "我决定从明天开始不再拖延，你觉得这个计划怎么样？",
+      "first_payload_seconds": 5.316,
+      "total_seconds": 8.159,
+      "output": [
+        {
+          "zh": "明天？这招我也听过八百遍了，通常结局都是‘明天再说’。",
+          "ja": "明日から？そのセリフ、何百回も聞いたよ。"
+        },
+        {
+          "zh": "不过嘛，要是你现在就定好闹钟，我倒是愿意陪你赌一把。",
+          "ja": "でも、今すぐアラームをセットするなら、賭けてもいいかもね。"
+        }
+      ],
+      "errors": []
+    }
+  ]
+}

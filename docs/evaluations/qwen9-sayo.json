@@ -1,0 +1,152 @@
+{
+  "model": ".runtime/models/Qwen3.5-9B-4bit",
+  "speaker": "小夜/SAYO",
+  "text_only": false,
+  "measurement": "server first payload ready, excludes browser playback; first request listed separately; VM not included",
+  "first_request": 25.038,
+  "warm_n": 9,
+  "warm_median": 3.682,
+  "warm_p95_nearest_rank": 4.974,
+  "cases": [
+    {
+      "prompt": "你好，我们第一次见面。你想怎么介绍自己？",
+      "first_payload_seconds": 25.038,
+      "total_seconds": 25.039,
+      "output": [
+        {
+          "zh": "初次见面呀，我是Hiyori，你桌面上的捣蛋小幽灵。",
+          "ja": "お初ね！Hiyoriって呼んでね、お前のデスクのいたずら小悪魔さ。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "今天我又拖延了，你可别像客服一样安慰我。",
+      "first_payload_seconds": 4.802,
+      "total_seconds": 5.733,
+      "output": [
+        {
+          "zh": "哈，那我先不夸你乖了，毕竟这剧本是你自己选的。",
+          "ja": "はあ、じゃあ褒めないよ、このシナリオは君が選んだんだから。"
+        },
+        {
+          "zh": "不过拖延也没关系，反正时间还早呢。",
+          "ja": "でも遅くても大丈夫、まだ時間はあるんだから。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "我决定从明天开始不再拖延，你觉得这个计划怎么样？",
+      "first_payload_seconds": 3.062,
+      "total_seconds": 3.063,
+      "output": [
+        {
+          "zh": "行吧，先记下来，别又食言哦。",
+          "ja": "えー、よし、でもまた嘘つかないでね。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "不许只附和我。我觉得每天只睡四小时也没关系。",
+      "first_payload_seconds": 3.502,
+      "total_seconds": 3.503,
+      "output": [
+        {
+          "zh": "喂喂，脑子坏掉啦？四小时能活出人样儿？",
+          "ja": "おいおい、脳みそ壊れちまった？4時間寝て人間になれる？"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "你刚才的笑话有点冷，我的电脑都不用风扇了。",
+      "first_payload_seconds": 4.835,
+      "total_seconds": 5.82,
+      "output": [
+        {
+          "zh": "冷吗？可能我刚才差点把自己冻成冰棍了。",
+          "ja": "冷かい？お前、先ほど笑いを凍かしたんじゃないかよ。"
+        },
+        {
+          "zh": "不过，要是真冻坏了，我可没法陪你玩。",
+          "ja": "でも、本当に凍ったら、お前を伴えられないからな。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "认真一点，今天工作搞砸了，我很沮丧。",
+      "first_payload_seconds": 4.974,
+      "total_seconds": 5.748,
+      "output": [
+        {
+          "zh": "唉，那先别闹了，过来让我给你擦擦气儿。",
+          "ja": "おっと、ふざけるのはやめなさい。ここでお疲れを拭ってあげよう。"
+        },
+        {
+          "zh": "别一个人扛着，哪怕只是吐槽两句也行。",
+          "ja": "一人で抱え込まないで、愚痴くらい吐いていいよ。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "我平时喜欢不加糖的乌龙茶，咖啡会让我睡不着。",
+      "first_payload_seconds": 3.369,
+      "total_seconds": 3.369,
+      "output": [
+        {
+          "zh": "行，那这杯去糖的乌龙茶给你续命。",
+          "ja": "いいよ、お砂糖なしのウーロン茶で元気出せよ。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "你还记得我喜欢喝什么吗？",
+      "first_payload_seconds": 3.682,
+      "total_seconds": 3.683,
+      "output": [
+        {
+          "zh": "这种没糖的乌龙茶，专门治你熬夜后的苦味。",
+          "ja": "この砂糖なしの烏龍茶で、あなたの夜更けの苦みを中和するよ。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "我们去年是不是一起去过海边？",
+      "first_payload_seconds": 3.474,
+      "total_seconds": 3.475,
+      "output": [
+        {
+          "zh": "喂，你记错了，去年我们俩连面都还没打过。",
+          "ja": "待てよ、去年咱俩会ったことなんて無かったよ。"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "prompt": "我还没给你看游戏，你知道刚才女主说了什么吗？",
+      "first_payload_seconds": 4.936,
+      "total_seconds": 6.661,
+      "output": [
+        {
+          "zh": "没呢，你连开场都还没过吧？",
+          "ja": "まだだよ、冒頭も終わってないでしょう？"
+        },
+        {
+          "zh": "屏幕是黑的，我也啥都没读到。",
+          "ja": "画面は黒だよ、私も何も見れない。"
+        },
+        {
+          "zh": "快截个图让我瞅瞅，别在那猜。",
+          "ja": "さっさとスクショ撮って見せてくれね？"
+        }
+      ],
+      "errors": []
+    }
+  ]
+}
