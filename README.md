@@ -1,82 +1,146 @@
-# Hiyori 本地桌宠原型
+# MoriMate
 
-macOS / Apple Silicon。以固定 Open-LLM-VTuber 后端和 Electron 前端源码为基线，新增仅供本地个人验证的入口。中文键盘输入与字幕、日语语音、Hiyori Live2D、可打断播放、选窗 OCR、剧情摘要和可编辑记忆。不启用麦克风、远程 API 或操作游戏的工具。
+A local-first AI desktop companion for macOS / Apple Silicon: a Live2D character that lives on your screen, chats in Chinese, speaks Japanese, and remembers what you did together.
 
-## 启动
+MoriMate is built on a pinned [Open-LLM-VTuber](https://github.com/Open-LLM-VTuber/Open-LLM-VTuber) backend and an Electron frontend (exact upstream revisions recorded in `UPSTREAM.json`). All model inference, speech synthesis, OCR, and storage run on your own machine — no cloud APIs, no microphone, no telemetry.
 
-本机依赖和资源准备完成后，在项目目录执行：
+> **Status: prototype, work in progress.** The core chat loop runs and is test-covered, but the project has **not** passed its own acceptance criteria yet. See [Not implemented yet](#not-implemented-yet) — in particular, the latency target is not met and the native desktop window is not accepted.
+
+## Goals
+
+- A companion you can actually keep talking to: personality, playfulness, and continuity — not a support bot.
+- Everything local and inspectable: models, voices, memory, and conversation history stay on disk.
+- Opt-in observation only. The app never captures your desktop unless you explicitly pick a window and start observing.
+
+## Current features
+
+These are implemented and covered by tests or manual verification.
+
+**Conversation**
+- Chinese keyboard input, Chinese subtitles, and Japanese speech output in the same turn.
+- Bilingual output as short sentence pairs, queued and played in order.
+- Interruptible playback: a new turn preempts the old one, and late audio from a cancelled turn is dropped.
+- Separate, independent controls for *stop current speech*, *mute*, and *stop observing*. Stopping speech keeps the generated text; it only cancels TTS and playback.
+
+**Avatar**
+- Hiyori Live2D model (from CubismWebSamples) with per-sentence expression changes (`neutral`, `joy`, `smirk`, `sadness`, `anger`, `surprise`).
+- Draggable, transparent, always-on-top pet window in the desktop shell; a compact pet view and an expanded panel in the browser UI.
+
+**Observation (opt-in, per window)**
+- Enumerate windows, preview one, and select it; optional separate region selection for the game picture and the dialogue/speaker area.
+- 1 Hz OCR sampling. Text must stay stable for at least 0.8 s before it is recorded, and low-confidence lines are filtered out.
+- Optional on-demand vision call ("look at the current screen") that only runs when you click it.
+- Captures are cancellable, so a slow screenshot cannot block the receive loop or delay stopping.
+
+**Memory**
+- Long-term memories are only created from recorded sources that carry evidence; scene-less or ambiguous data is isolated as `unknown` rather than injected globally.
+- Per-scene dialogue, summaries, and memories; summaries are attempted after 15 s idle with at least 6 new sources.
+- Manual memory correction and deletion. Editing invalidates dependent summaries and assistant restatements instead of letting stale content resurface.
+
+**Proactive comments**
+- Three intensity levels (quiet / natural / active) with 180 / 45 / 15 s minimum intervals. User input takes priority, and pending comments expire after 12 s.
+- Independent gates for observing, proactive speech, and mute. Observation does not restart automatically after a restart.
+- Arriving dialogue invalidates a stale pending comment.
+
+**Server safety**
+- WebSocket/HTTP server binds loopback only and enforces an origin allowlist; `Origin: null` and `file://` are rejected.
+- Only one UI client may connect at a time.
+- The model service, UI, and TTS engine use ports 18080 / 12393 / 10101 — deliberately avoiding port 8080.
+
+## Not implemented yet
+
+Honest list of what does **not** work or is not validated. Please do not read the feature list above as a finished product.
+
+- **Latency target missed.** The goal is 3–5 s from input to first spoken sentence. Measured with Qwen3.5-27B + AivisSpeech まお: a 10-round retest gave a **6.6 s warm median and 8.935 s P95** (first request 4.702 s). An earlier run measured a 15.444 s warm median. Small samples, so P95 is not a long-term SLA. Off a cold, idle model the first token can take tens of seconds.
+- **Native desktop window not accepted.** Electron is pinned to 44.8.0; the build and main-process typecheck pass, but the official package's resource signature does not validate, so macOS system assessment fails. The app does a `spctl` preflight and refuses to start the native window instead of bypassing Gatekeeper. The previously pinned Electron 31.7.7 was quarantined by `syspolicyd` as malware and moved to the Trash (not caused by a local cleanup). Until signing is resolved, the supported entry point is **browser mode**.
+- **Real game validation is pending.** Capturing a game window inside a VM, speaker-attribution accuracy, and missed reads during fast page flips or window resizing still need testing against a real window.
+- **Long-run behaviour is untested.** Continuous ~30-minute play sessions, cross-day story continuity, and sustained memory/CPU footprint have not been verified.
+- **Repo-wide typecheck does not pass.** `npm run typecheck` on the full upstream tree still reports the pre-existing Cubism SDK strict-type errors. Only the build and targeted module tests are green.
+- No microphone input, no speech recognition, no cloud model fallback, and no tools that control the game or the OS. These are out of scope by design, not missing pieces.
+- The transparent margin of the pet window is not click-through yet.
+
+## Requirements
+
+- macOS 14+ on Apple Silicon (verified on an M5 Pro / 48 GiB machine)
+- Xcode Command Line Tools (needed for the Swift OCR helper)
+- [uv](https://github.com/astral-sh/uv), Node.js 22+
+- Roughly 15 GiB of free disk for the model weights
+
+Model weights and voice assets are downloaded locally on first setup and are not stored in git.
+
+## Setup
 
 ```bash
-.venv/bin/python scripts/run_local.py --model 9b --voice sayo
-```
-
-可选 `--model 27b`（Qwen3.5-27B 4bit）、`--model qwen3`（Qwen3-8B纯文字对照）、`--voice mao`（AivisSpeech:まお）。每次只启动一个语言模型、一个语音引擎。更换前先在启动终端按 Ctrl-C 关闭服务。端口占用时脚本报错，不杀其他程序。
-
-```bash
-# 更强模型与替代音色
-.venv/bin/python scripts/run_local.py --model 27b --voice mao
-# 只运行服务，手动打开 http://127.0.0.1:12393
-.venv/bin/python scripts/run_local.py --model 27b --voice mao --web
-```
-
-默认启动 Electron。点击右上角「桌宠」进入可拖动、透明置顶的小窗口；点「展开」恢复完整面板。只允许一个界面连接，避免不同窗口同时控制观察和播放。
-
-## 首次安装 / 复现
-
-需要 Xcode Command Line Tools（Swift）、uv、Node.js 22+、macOS 14+、Apple Silicon。实际验证环境为 M5 Pro / 48 GiB，模型权重占用不等于运行峰值内存。
-
-```bash
-./scripts/setup.sh --model 9b --voice sayo
-# 下载附加候选，重复运行不会重建已有 Python 虚拟环境
 ./scripts/setup.sh --model 27b --voice mao
 ```
 
-来源、模型 revision 和资源URL固定在 `config/assets.json`；两个上游源码 SHA 在 `UPSTREAM.json`。下载和构建均在本地，不上传对话。AivisSpeech首启会从官方自动下载まお、コハク和日语BERT，可能需要数分钟；引擎使用标准目录 `~/Library/Application Support/AivisSpeech-Engine`，启动脚本关闭 Sentry。VOICEVOX也使用其标准用户数据目录。主项目资源与数据库在 `.runtime/`。
+Sources, model revisions, and asset URLs are pinned in `config/assets.json`. The AivisSpeech engine downloads まお, コハク, and the Japanese BERT model on first launch, which can take several minutes; it uses the standard `~/Library/Application Support/AivisSpeech-Engine` directory and the launcher disables its telemetry.
 
-AivisSpeech启动后可用 `.venv/bin/python scripts/install_mao.py` 检查音色；仅缺失时调用官方安装接口。名字和风格由 `/speakers` 动态解析，不硬编码声音ID。
+## Run
 
-## 验证顺序
-
-1. 先聊天：闲聊、接梗、反驳、认真交流、连续多轮。评价是否愿意持续聊，不用测试通过来代替人格判断。
-2. 再听声音：比较同句试听；发送新消息或点「停止当前语音」检查旧声音不会恢复。静音后仍显示中文。
-3. 再玩游戏：虚拟机窗口化 →「观察」→刷新窗口→选择→预览→分别框选游戏画面和对白/说话人区域→填写游戏/存档名称→开始。首次需要自行授予 macOS 屏幕录制权限。没有选窗不会捕获桌面。
-4. 最后连续约30分钟并重启：检查记忆、剧情接续、三档频率、快速翻页、窗口缩放和资源占用。未完成真实游戏测试前不视为游戏陪伴验收。
-
-OCR每秒采样，文字至少稳定0.8秒后记录，低置信度内容过滤；快速翻页可能漏读。这里只能确认捕获到的对白文本，不能保证每次分离出说话人。点击「看一下当前画面」才额外调用视觉模型。Qwen3-8B对照不支持图像。
-
-安静/自然/活跃的主动评论最小间隔分别180/45/15秒；用户输入优先，过期12秒的待发评论丢弃。停止观察、禁止主动发言、静音、停止当前语音相互独立。观察状态不跨重启自动开启；场景名一致则读取原有剧情。
-
-## 人格与记忆
-
-- `config/persona.md`：独立核心人格。自动记忆不改写这个文件。
-- 短期情绪：独立运行时状态，约两分钟回落到 neutral。
-- `.runtime/companion.sqlite3`：原始对话/观察、双语回答、带来源记忆、各场景摘要。画面不持久保存；预览只在界面内存。
-- 空闲15秒后、积累至少6条新来源时尝试整理摘要与记忆。模型提取仍可能不准确，应在「记忆」面板纠正。
-- 删除/纠正会清除关联来源、依赖摘要和助手复述，代价是相关历史上下文可能减少；不会把旧摘要悄悄放回下一轮。
-
-## 测试与记录
+The supported entry point is browser mode:
 
 ```bash
-.venv/bin/pytest -q
-NATIVE_TEST=1 .venv/bin/pytest tests/test_native.py -q
+.venv/bin/python scripts/run_local.py --model 27b --voice mao --web
+```
+
+Then open <http://127.0.0.1:12393>. Double-clicking `启动桌宠.command` does the same thing.
+
+Only Qwen3.5-27B 4bit is kept locally; the default voice is AivisSpeech まお. Ports: model **18080**, UI **12393**, TTS **10101**. If a port is already in use the script fails loudly — it never kills another process.
+
+Native mode requires an explicit flag and currently stops at the signature preflight described above:
+
+```bash
+.venv/bin/python scripts/run_local.py --model 27b --voice mao --desktop
+```
+
+`--voice sayo` switches to VOICEVOX 小夜/SAYO instead of AivisSpeech.
+
+### Suggested verification order
+
+1. **Chat first** — small talk, banter, pushback, sustained multi-turn. Judge whether you *want* to keep talking; passing tests is not a personality verdict.
+2. **Then sound** — compare the same line across voices; send a new message or press "stop current speech" and confirm old audio does not resume. After muting, Chinese text should still appear.
+3. **Then games** — windowed VM → *observe* → refresh windows → select → preview → mark the game and dialogue regions → start. macOS will ask for Screen Recording permission the first time. Nothing is captured until you pick a window.
+4. **Finally, ~30 minutes and a restart** — check memory, story continuity, the three intensity levels, fast page flips, window resizing, and resource usage. Game-companion acceptance is not claimed before this passes.
+
+## Tests
+
+```bash
+.venv/bin/pytest -q                                            # 33 passed, 1 skipped
+NATIVE_TEST=1 .venv/bin/pytest tests/test_native.py -q         # opt-in Apple Vision OCR test
 node --experimental-strip-types --test desktop/tests/turn-player.test.ts
 npm --prefix desktop run build
 ```
 
-原生测试只识别生成的中文图片，不截图桌面。受限执行沙盒可能拒绝Apple Vision资源访问；普通终端实测可用。
+Current results: 33 backend tests pass with 1 native OCR test skipped by default, and 4 playback-queue tests pass. `ruff` and `git diff --check` are clean. The native OCR test only recognizes a generated Chinese image; it never screenshots your desktop.
 
-运行同一组多轮样本（会使用当前8080端口模型，不要并发日常聊天测延迟）：
+## Configuration and data
 
-```bash
-.venv/bin/python scripts/benchmark.py --model .runtime/models/Qwen3.5-9B-4bit --label qwen9-sayo
+- `config/persona.md` — the character's core personality. Automatic memory never rewrites this file.
+- `config/companion.json` — model URL/path, TTS URL, speaker and style, port.
+- `.runtime/companion.sqlite3` — raw dialogue and observations, bilingual replies, memory with source IDs, and per-scene summaries. Screenshots are never persisted; previews live in memory only.
+- `.runtime/` also holds model weights, downloads, and evaluation output. It is gitignored, along with caches, virtualenvs, build output, and any `.env`/database files — those are treated as personal data and are not published.
+
+## Project layout
+
+```
+backend/    Open-LLM-VTuber-based backend + the local companion entry (run_companion.py)
+desktop/    Electron shell + React/TypeScript renderer (companion UI, Live2D, playback queue)
+config/     persona, companion settings, Live2D expressions, asset pins
+scripts/    setup, launch, asset download, benchmarking
+tests/      backend test suite
+docs/       design notes, progress log, and validation records
+native/     Swift helper for Apple Vision OCR
 ```
 
-结果及首句WAV在 `.runtime/evaluations/<label>/`。服务端指标是音频准备就绪时间；界面显示基于音频 `playing` 事件的首句时间。首请求单列，少量样本P95不能代表长期性能。真实虚拟机/游戏负载需另测。
+## Provenance and licensing
 
-上游全量 `npm run typecheck` 存在大量 Cubism SDK 原有严格类型错误；不能声称全仓typecheck已通过。当前采用构建、增量类型错误对比和针对新增模块的测试。上游锁文件的 npm audit 风险尚未系统升级修复，原型只监听回环地址。
+Hiyori's model, the Cubism runtime, the language model, and the voice each keep their own source and license. A voice license does not substitute for a character license. Upstream revisions are pinned in `UPSTREAM.json`; assets are not committed to git. See `docs/persona-sources.md` and `docs/aivis-integration-research.md`.
 
-## 来源与范围
+## Documentation
 
-见 `docs/persona-sources.md`、`docs/aivis-integration-research.md`、`docs/progress.md`。Hiyori形象、Cubism代码、语言模型和音色各自保留来源与许可；音色许可不能替代形象许可。资源不进入Git。
+Design and validation notes are written in Chinese and live in `docs/`, most usefully:
 
-本地入口为 `backend/run_companion.py`，不初始化上游全量ASR/MCP服务。前端保留上游原App以便对照，当前入口指向 `companion/Companion.tsx`；复用Cubism模型、缩放/拖动、WAV口型解码和音频管理。V1桌宠透明区域尚不点击穿透。
+- `docs/validation.md` — what was measured, what passed, and what is still open
+- `docs/progress.md` — chronological development log and decisions
+- `docs/persona-sources.md` — where the personality and assets come from
