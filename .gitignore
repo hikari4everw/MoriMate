@@ -36,6 +36,9 @@ desktop/dist/
 desktop/dist-web/
 desktop/resources/runtime/
 
+# --- Local-only notes (never published) ---
+project.md
+
 # --- Agent / tool scratch ---
 .superpowers/
 
