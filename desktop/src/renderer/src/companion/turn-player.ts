@@ -6,6 +6,8 @@ export class TurnPlayer<T> {
   private queue: T[] = [];
   private running = false;
   private ended = false;
+  private textSeen = new Set<number>();
+  private audioSeen = new Set<number>();
   private play: (item: T, current: () => boolean) => Promise<void>;
   private cancel: () => void;
   private complete: (turn: number) => void;
@@ -25,10 +27,22 @@ export class TurnPlayer<T> {
   }
 
   begin(turn: number) {
-    if (turn <= this.lastTurn) return;
+    if (turn <= this.lastTurn) return false;
     this.stop();
     this.turn = turn;
     this.lastTurn = turn;
+    return true;
+  }
+
+  accepts(turn: number) {
+    return turn === this.turn;
+  }
+
+  acceptSentence(turn: number, sentence: number, expiresAt?: number) {
+    if (expiresAt !== undefined && Date.now() >= expiresAt) return false;
+    if (!this.accepts(turn) || this.textSeen.has(sentence)) return false;
+    this.textSeen.add(sentence);
+    return true;
   }
 
   cancelPlayback() {
@@ -44,11 +58,17 @@ export class TurnPlayer<T> {
     this.queue = [];
     this.running = false;
     this.ended = false;
+    this.textSeen.clear();
+    this.audioSeen.clear();
     this.cancel();
   }
 
-  enqueue(turn: number, item: T) {
+  enqueue(turn: number, item: T, sentence?: number) {
     if (turn !== this.turn) return;
+    if (sentence !== undefined) {
+      if (this.audioSeen.has(sentence)) return;
+      this.audioSeen.add(sentence);
+    }
     this.queue.push(item);
     void this.drain();
   }
@@ -75,8 +95,10 @@ export class TurnPlayer<T> {
         this.running = false;
         if (this.queue.length) void this.drain();
         else if (this.ended && this.turn !== null) {
+          const finishedTurn = this.turn;
+          this.turn = null;
           this.ended = false;
-          this.complete(this.turn);
+          this.complete(finishedTurn);
         }
       }
     }

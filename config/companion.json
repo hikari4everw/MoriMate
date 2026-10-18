@@ -1,6 +1,8 @@
 {
   "model_url": "http://127.0.0.1:18080/v1",
   "model": ".runtime/models/Qwen3.5-27B-4bit",
+  "backend": "mlx",
+  "supports_vision": true,
   "tts_url": "http://127.0.0.1:10101",
   "speaker_name": "まお",
   "style_name": "ノーマル",

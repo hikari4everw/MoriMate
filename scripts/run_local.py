@@ -5,12 +5,59 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MODELS = {"9b": "Qwen3.5-9B-4bit", "27b": "Qwen3.5-27B-4bit", "qwen3": "Qwen3-8B-4bit"}
+sys.path.insert(0, str(ROOT / "backend/src"))
+from open_llm_vtuber.companion.model_service import model_launch  # noqa: E402, F401
+from open_llm_vtuber.companion.voices import VoiceCatalog  # noqa: E402
+
+MODELS = {
+    "9b": "Qwen3.5-9B-4bit",
+    "27b": "Qwen3.5-27B-4bit",
+    "qwen3": "Qwen3-8B-4bit",
+    "qwen38-rp": "Qwen3.8-27B-Heretic-JP-Roleplay-NSFW-Q4_K_M",
+}
+
+
+def ensure_observer(root=ROOT):
+    source = root / "native/WindowObserver.swift"
+    executable = root / ".runtime/window-observer"
+    if (
+        executable.exists()
+        and executable.stat().st_mtime_ns >= source.stat().st_mtime_ns
+    ):
+        return
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    cache = root / ".cache/swift"
+    cache.mkdir(parents=True, exist_ok=True)
+    temporary = executable.with_suffix(".building")
+    try:
+        subprocess.run(
+            [
+                "swiftc",
+                "-parse-as-library",
+                "-O",
+                "-module-cache-path",
+                str(cache),
+                str(source),
+                "-o",
+                str(temporary),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        temporary.replace(executable)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"窗口观察工具编译失败；未启动模型或语音服务：{exc.stderr}"
+        ) from exc
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def wait_ready(url, process, timeout=120):
@@ -33,7 +80,12 @@ def wait_ready(url, process, timeout=120):
 def main():
     parser = argparse.ArgumentParser(description="启动本地 Hiyori；不连接付费 API")
     parser.add_argument("--model", choices=MODELS, default="27b")
-    parser.add_argument("--voice", choices=["sayo", "mao"], default="mao")
+    parser.add_argument(
+        "--voice",
+        choices=["sayo", "mao", "roxy"],
+        default=None,
+        help="默认使用 config/voices.json 中的角色",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--web", dest="web", action="store_true", help="浏览器模式（默认）"
@@ -60,22 +112,30 @@ def main():
             parser.error(
                 "Electron 未通过 macOS 安全验证；请使用 --web。未启动模型或语音服务。"
             )
-    model = ".runtime/models/" + MODELS[args.model]
-    if not Path(model, "config.json").exists():
-        parser.error("模型未下载，请先运行 scripts/setup.sh --model " + args.model)
-    ports = [18080, 12393, 50021 if args.voice == "sayo" else 10101]
+    try:
+        _, model, backend_name, supports_vision = model_launch(ROOT, args.model)
+    except RuntimeError as exc:
+        parser.error(str(exc))
+    voice_key = args.voice or VoiceCatalog(ROOT).default
+    ports = [18080, 12393]
     for port in ports:
         with socket.socket() as s:
             if s.connect_ex(("127.0.0.1", port)) == 0:
                 parser.error(
                     f"端口 {port} 已占用；请关闭此前启动的桌宠服务后重试。不会终止其他程序。"
                 )
+    ensure_observer()
     processes = []
     logs = []
     env = os.environ.copy()
     env["HF_HOME"] = str(ROOT / ".cache/huggingface")
+    env["COMPANION_MANAGED_MODELS"] = "1"
+    env["COMPANION_MODEL_KEY"] = args.model
     env["COMPANION_MODEL"] = model
-    env["COMPANION_VOICE"] = args.voice
+    env["COMPANION_MODEL_BACKEND"] = backend_name
+    env["COMPANION_MODEL_VISION"] = "1" if supports_vision else "0"
+    env["COMPANION_MANAGED_VOICES"] = "1"
+    env["COMPANION_VOICE"] = voice_key
 
     def launch(command, name):
         log = open(ROOT / ".runtime" / f"{name}.log", "a")
@@ -95,68 +155,10 @@ def main():
 
     signal.signal(signal.SIGTERM, shutdown)
     try:
-        if args.voice == "sayo":
-            voice = launch(
-                [
-                    ".runtime/voicevox/macos-arm64/run",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    "50021",
-                ],
-                "voicevox",
-            )
-        else:
-            candidates = list((ROOT / ".runtime/aivis").rglob("run"))
-            if not candidates:
-                raise RuntimeError(
-                    "AivisSpeech 未安装，请先运行 scripts/setup.sh --voice mao"
-                )
-            voice = launch(
-                [
-                    str(candidates[0]),
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    "10101",
-                    "--disable_sentry",
-                ],
-                "aivis",
-            )
-        print(
-            "正在启动语音引擎，首次 AivisSpeech 会下载模型，详情见 .runtime/aivis.log",
-            flush=True,
-        )
-        wait_ready(
-            f"http://127.0.0.1:{ports[2]}/version",
-            voice,
-            1800 if args.voice == "mao" else 120,
-        )
-        module = "mlx_lm.server" if args.model == "qwen3" else "mlx_vlm.server"
-        model_process = launch(
-            [
-                ".venv-mlx/bin/python",
-                "-m",
-                module,
-                "--model",
-                model,
-                "--host",
-                "127.0.0.1",
-                "--port",
-                "18080",
-            ]
-            + (
-                ["--chat-template-args", '{"enable_thinking":false}']
-                if args.model == "qwen3"
-                else []
-            ),
-            "mlx",
-        )
-        wait_ready("http://127.0.0.1:18080/v1/models", model_process, 180)
         backend = launch([".venv/bin/python", "backend/run_companion.py"], "backend")
-        wait_ready("http://127.0.0.1:12393/health", backend)
+        wait_ready("http://127.0.0.1:12393/health", backend, 210)
         print(
-            f"本地桌宠已启动：{MODELS[args.model]} / {args.voice}\nhttp://127.0.0.1:12393\n按 Ctrl-C 关闭本次启动的服务。",
+            f"本地桌宠已启动：{MODELS[args.model]} / 语音首选 {voice_key}\nhttp://127.0.0.1:12393\n语音加载状态见界面；日志 .runtime/managed-voice.log\n按 Ctrl-C 关闭本次启动的服务。",
             flush=True,
         )
         if not args.web:
@@ -173,7 +175,7 @@ def main():
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
                 try:
-                    process.wait(timeout=8)
+                    process.wait(timeout=30)
                 except subprocess.TimeoutExpired:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait()

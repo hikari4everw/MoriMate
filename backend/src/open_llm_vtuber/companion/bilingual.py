@@ -1,6 +1,8 @@
 import json
 from dataclasses import dataclass
 
+from .voices import VOICE_TONES
+
 EMOTIONS = {"neutral", "joy", "smirk", "sadness", "anger", "surprise"}
 
 
@@ -9,6 +11,7 @@ class Sentence:
     zh: str
     ja: str
     emotion: str = "neutral"
+    voice_tone: str = "neutral"
 
 
 class BilingualParser:
@@ -44,8 +47,11 @@ class BilingualParser:
             if any(tag in (zh + ja).lower() for tag in ("<think", "</think", "```")):
                 raise ValueError()
             emotion = obj.get("emotion", "neutral")
+            tone = obj.get("voice_tone", "neutral")
             return Sentence(
-                zh.strip(), ja.strip(), emotion if emotion in EMOTIONS else "neutral"
+                zh.strip(), ja.strip(),
+                emotion if isinstance(emotion, str) and emotion in EMOTIONS else "neutral",
+                tone if isinstance(tone, str) and tone in VOICE_TONES else "neutral",
             )
         except (ValueError, KeyError, TypeError) as exc:
             raise ValueError("模型未输出完整的中日双语短句，请重试") from exc

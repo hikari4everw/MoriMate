@@ -7,16 +7,16 @@ macOS / Apple Silicon。以固定 Open-LLM-VTuber 后端和 Electron 前端源�
 本机依赖和资源准备完成后，在项目目录执行：
 
 ```bash
-.venv/bin/python scripts/run_local.py --model 27b --voice mao --web
+.venv/bin/python scripts/run_local.py --model 27b --web
 ```
 
-当前只保留 Qwen3.5-27B 4bit；默认音色为 AivisSpeech:まお。模型端口 **18080**，界面 **12393**，语音 **10101**，不使用 WebDAV 的 8080。端口占用时脚本报错，不杀其他程序。
+默认仍为 Qwen3.5-27B 4bit，已准备的 Qwen3.8 候选可在界面试用；默认语音为 **GPT-SoVITS:Roxy3.0**，界面可切回 **AivisSpeech:まお**。模型端口 **18080**，界面 **12393**，GPT-SoVITS **9880**，AivisSpeech **10101**，不使用 WebDAV 的 8080。端口冲突不接管或终止其他程序。
 
 默认浏览器模式（`--web`），手动打开 http://127.0.0.1:12393 。原生模式需显式指定 `--desktop`。双击 `启动桌宠.command` 目前也启动浏览器服务模式。macOS 已将旧 Electron 31.7.7 标记并移入废纸篓。依赖已升级并固定到官方44.8.0，构建与主进程类型检查通过，但系统资源签名验证仍失败；原生入口会提前报告，不启动模型/语音。原生窗口待完成签名验证，不绕过安全检查。只允许一个界面连接。
 
 ## 首次安装 / 复现
 
-需要 Xcode Command Line Tools（Swift）、uv、Node.js 22+、macOS 14+、Apple Silicon。实际验证环境为 M5 Pro / 48 GiB，模型权重占用不等于运行峰值内存。
+需要 Xcode Command Line Tools（Swift）、uv、Node.js 22+、macOS 14+、Apple Silicon；候选 GGUF 运行时还需要 CMake。实际验证环境为 M5 Pro / 48 GiB，模型权重占用不等于运行峰值内存。
 
 ```bash
 ./scripts/setup.sh --model 27b --voice mao
@@ -26,11 +26,52 @@ macOS / Apple Silicon。以固定 Open-LLM-VTuber 后端和 Electron 前端源�
 
 AivisSpeech启动后可用 `.venv/bin/python scripts/install_mao.py` 检查音色；仅缺失时调用官方安装接口。名字和风格由 `/speakers` 动态解析，不硬编码声音ID。
 
+## 语音引擎与角色
+
+本机 GPT-SoVITS 复用相邻 `TTS工具/GPT-SoVITS` 安装及其独立 Python 环境；安装位置、角色权重对及参考素材在 `config/voices.json` 登记。`setup.sh --voice mao` 准备 AivisSpeech 回退资源，不下载或安装 GPT-SoVITS。跨机器使用前需修改路径并准备资源。
+
+界面顶部可选“语音引擎”和“角色音色”，目前 GPT-SoVITS 只有 Roxy3.0。一次只运行一个自有语音引擎；切换会停止当前回复和播报，保留已显示文字、历史、人格与记忆，不自动重答。加载含实际 WAV 预热验证，期间暂停新回合，仍可静音和停止观察。每次重启默认回到 Roxy，界面选择不写入默认配置；显式 `--voice mao` / `--voice sayo` 继续覆盖默认值。
+
+语音自动按句选择默认、委屈、害羞、慵懒、战斗、撒娇、欣慰、自嘲或责备，普通聊天以默认（慵懒参考）为主。表情继续使用原六类 emotion，和声音语气分开。AivisSpeech 自动选择可用风格，缺少对应风格时使用ノーマル。
+
+启动或切换失败会显示原因并回退 AivisSpeech；两者都失败则继续文字对话，可点“重试语音”。单句合成失败仅跳过本句语音，保留文字，不换引擎、不补播。HTTP 取消和旧音频丢弃不代表 GPT-SoVITS 计算能立即中止。
+
+Roxy 参考文本来自现有文件名及训练文本比对，**尚未完成逐条听校**；配置保留 `reference_transcripts_verified: false`，尤其战斗、自嘲等条目需核对。八类参考选择与 WAV 生成已经跑通，不等于情绪效果已通过试听验收。配置格式、验证数据与试听命令见 [本地语音说明](docs/local-voice-engines.md)。
+
+## 候选模型准备与对照
+
+Qwen3.8-27B-Heretic-JP-Roleplay-NSFW 的普通 Q4_K_M 和 F16 projector 为候选，**旧 Qwen3.5-27B 仍为默认**。资源及源码固定版本和 SHA256，下载约17.5GB；准备脚本不改默认配置，也不处理 Codex 本地模型。
+
+```bash
+.venv/bin/python scripts/prepare_candidate.py
+.venv/bin/python scripts/run_local.py --model qwen38-rp --voice mao --web
+```
+
+启动前先关闭原桌宠；端口18080已占用时脚本报错，不终止现有服务。启动器会在原生观察源码更新时先重编译工具。候选使用本地 llama.cpp v0.7.0 / Metal、32768上下文、单并发，保留完整视觉文件。
+
+聊天面板顶部可选择 **Qwen3.5-27B（默认）／Qwen3.8-27B（候选）**，在聊天、观察、记忆页均可使用。一次只加载一个；切换会停止当前回复及语音，保留已显示文字、草稿、历史、记忆及观察设置，不自动重新回答。加载期间显示阶段，不能发送或查看画面，仍可静音和停止观察。失败会说明原因并尝试恢复原配置，可点击「重试」。
+
+候选可选关闭、有限预算、完整思考；完整思考可能长时间等待。切换思考档位无需重载模型，但会停止当前回复与语音。旧模型固定关闭，记忆整理始终关闭。选择只保留在本次后端运行中；正常重启仍是旧模型，候选恢复有限预算。
+
+启动器设置 `COMPANION_MANAGED_MODELS=1`，由后端独占管理自己创建的模型进程，启动器继续管理语音和后端。后端默认启动旧模型，先停止自有旧进程并确认端口释放再加载候选；退出等待8秒、启动180秒，并核实模型身份。资源缺失不会自动下载，端口冲突不会终止或接管其他进程。直接运行 `backend/run_companion.py` 且未设置托管变量时仍连接外部模型服务，界面不能切换外接进程。注入测试模型不会启动真实模型。浏览器断线不取消已开始的切换，重连读取最新状态。
+
+候选默认开启有限 thinking：闲聊128、故事/详细讨论512、主动评论64 token，记忆整理关闭。推理与正文分离，推理不进入字幕、语音或记忆。作者推荐角色对话开启思考，但中文、视觉和开启后的延迟仍需本机对照，不能凭模型名称认定升级。
+
+顺序运行旧模型与候选关闭／有限／完整思考的同题对照：
+
+```bash
+.venv/bin/python scripts/evaluate_models.py --label candidate-comparison
+```
+
+测试使用独立临时数据库和生成的彩色方块图片。文字、逐句及完整试听WAV、指标在 `.runtime/evaluations/<label>/`；不读取个人对话。首音指标是服务端音频就绪，界面实际播放延迟需另外观察。内存指标为0.5秒采样的模型进程RSS，不代表整个系统的统一内存峰值。完整思考可能明显增加等待，单条评测最多300秒，超出记录为未完成。
+
+通过格式、图片理解和打断回归后，由用户试听选择是否切换默认。实际结果和待验收事项见 `docs/window-dialogue-validation.md`。
+
 ## 验证顺序
 
 1. 先聊天：闲聊、接梗、反驳、认真交流、连续多轮。评价是否愿意持续聊，不用测试通过来代替人格判断。
 2. 再听声音：比较同句试听；发送新消息或点「停止当前语音」检查旧声音不会恢复。静音后仍显示中文。
-3. 再玩游戏：虚拟机窗口化 →「观察」→刷新窗口→选择→预览→分别框选游戏画面和对白/说话人区域→填写游戏/存档名称→开始。首次需要自行授予 macOS 屏幕录制权限。没有选窗不会捕获桌面。
+3. 再玩游戏：虚拟机窗口化 →「观察」→刷新窗口→选择→预览→分别框选游戏画面和对白/说话人区域→填写游戏/存档名称→开始。首次需要自行授予 macOS 屏幕录制权限。没有选窗不会捕获桌面；预览失败会提示权限、窗口失效或超时。
 4. 最后连续约30分钟并重启：检查记忆、剧情接续、三档频率、快速翻页、窗口缩放和资源占用。未完成真实游戏测试前不视为游戏陪伴验收。
 
 OCR每秒采样，文字至少稳定0.8秒后记录，低置信度内容过滤；快速翻页可能漏读。这里只能确认捕获到的对白文本，不能保证每次分离出说话人。点击「看一下当前画面」才额外调用视觉模型。Qwen3-8B对照不支持图像。
@@ -39,6 +80,8 @@ OCR每秒采样，文字至少稳定0.8秒后记录，低置信度内容过滤�
 
 ## 人格与记忆
 
+- 闲聊自然简短，故事或详细解释按要求展开；默认故事约500–1000中文字。完整中文句先显示，日语逐句跟进；字幕、口型及表情随播放推进。停止语音保留后续文字，新输入打断旧回合。
+- 每轮重新注入现实本地日期、星期、时区和时段。历史保留记录时间，摘要附来源时间范围；记录时间、事件时间与游戏内时间分开解释。没有事件日期来源时不假定知道。
 - `config/persona.md`：独立核心人格。自动记忆不改写这个文件。
 - 短期情绪：独立运行时状态，约两分钟回落到 neutral。
 - `.runtime/companion.sqlite3`：原始对话/观察、双语回答、带来源记忆、各场景摘要。画面不持久保存；预览只在界面内存。
@@ -50,16 +93,23 @@ OCR每秒采样，文字至少稳定0.8秒后记录，低置信度内容过滤�
 ```bash
 .venv/bin/pytest -q
 NATIVE_TEST=1 .venv/bin/pytest tests/test_native.py -q
+NATIVE_CAPTURE_TEST=1 .venv/bin/pytest tests/test_native.py -q
 node --experimental-strip-types --test desktop/tests/turn-player.test.ts
 npm --prefix desktop run build
 ```
 
-原生测试只识别生成的中文图片，不截图桌面。受限执行沙盒可能拒绝Apple Vision资源访问；普通终端实测可用。
+原生 OCR 测试只识别生成的中文图片；捕获测试只打开并截图专用测试窗口，验证裁剪和关闭窗口。捕获测试需要屏幕录制权限。受限执行沙盒可能拒绝Apple Vision资源访问。
 
 运行同一组多轮样本（会使用当前18080端口模型，不要并发日常聊天测延迟）：
 
 ```bash
 .venv/bin/python scripts/benchmark.py --model .runtime/models/Qwen3.5-27B-4bit --voice-url http://127.0.0.1:10101 --speaker まお --label qwen27-mao
+```
+
+补充非露骨成人话题、记忆整理及简短故事追问对照：
+
+```bash
+.venv/bin/python scripts/evaluate_models.py --profile all --suite discussion --count 5 --label discussion-comparison
 ```
 
 结果及首句WAV在 `.runtime/evaluations/<label>/`。服务端指标是音频准备就绪时间；界面显示基于音频 `playing` 事件的首句时间。首请求单列，少量样本P95不能代表长期性能。真实虚拟机/游戏负载需另测。

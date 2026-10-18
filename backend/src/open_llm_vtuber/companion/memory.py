@@ -70,6 +70,30 @@ class MemoryStore:
         ).fetchall()
         return [dict(r) for r in reversed(rows)]
 
+    def conversation_sources(self, scene: str, limit: int = 20) -> list[dict]:
+        rows = self.sources(scene, limit)
+        if rows and rows[0]["kind"] == "assistant":
+            boundary = self.db.execute(
+                "SELECT id FROM sources WHERE redacted=0 AND scene=? AND kind!='assistant' AND id<? ORDER BY id DESC LIMIT 1",
+                (scene, rows[0]["id"]),
+            ).fetchone()
+            if boundary:
+                rows = [
+                    dict(r)
+                    for r in self.db.execute(
+                        "SELECT * FROM sources WHERE redacted=0 AND scene=? AND id>=? ORDER BY id",
+                        (scene, boundary["id"]),
+                    )
+                ]
+        return rows
+
+    def recorded_range(self, source_ids: list[int]) -> dict | None:
+        rows = self._valid_sources(source_ids)
+        if not rows:
+            return None
+        dates = sorted(r["created"] for r in rows)
+        return {"recorded_from": dates[0], "recorded_to": dates[-1]}
+
     def _valid_sources(self, ids: list[int]) -> list[dict]:
         if not ids or len(ids) > 20000:
             return []
@@ -194,7 +218,11 @@ class MemoryStore:
         row = self.db.execute(
             "SELECT * FROM summaries WHERE scene=?", (scene,)
         ).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        result.update(self.recorded_range(json.loads(row["source_ids"])) or {})
+        return result
 
     def mark_processed(self, ids: list[int]):
         with self.db:

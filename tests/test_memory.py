@@ -76,3 +76,35 @@ def test_legacy_corrected_memory_with_lost_scope_is_quarantined(tmp_path):
         )
     store = MemoryStore(path)
     assert store.memories()[0]["scene"] == "unknown"
+
+
+def test_summary_exposes_recorded_range_from_its_actual_sources(tmp_path):
+    store = MemoryStore(tmp_path / "m.db")
+    first = store.add_source("user", "昨天去看海了")
+    last = store.add_source("user", "今天回来了")
+    with store.db:
+        store.db.execute(
+            "UPDATE sources SET created=? WHERE id=?",
+            ("2026-10-17T02:00:00+00:00", first),
+        )
+        store.db.execute(
+            "UPDATE sources SET created=? WHERE id=?",
+            ("2026-10-18T01:00:00+00:00", last),
+        )
+    store.save_summary("daily", "用户提到看海和返程。", [first, last])
+    summary = store.summary("daily")
+    assert summary["recorded_from"] == "2026-10-17T02:00:00+00:00"
+    assert summary["recorded_to"] == "2026-10-18T01:00:00+00:00"
+
+
+def test_observation_history_does_not_expand_back_to_an_old_user(tmp_path):
+    store = MemoryStore(tmp_path / "m.db")
+    store.add_source("user", "开始看游戏")
+    for n in range(300):
+        store.add_source("observation", f"对白{n}")
+        store.add_source("assistant", f"评论{n}", speech=f"コメント{n}")
+    store.add_source("user", "刚才怎么了")
+    rows = store.conversation_sources("daily", limit=20)
+    assert len(rows) == 21
+    assert rows[0]["kind"] == "observation"
+    assert rows[-1]["text"] == "刚才怎么了"

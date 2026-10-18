@@ -1,0 +1,74 @@
+{
+  "default_voice": "roxy",
+  "fallback_voice": "mao",
+  "engines": {
+    "gpt-sovits": {
+      "label": "GPT-SoVITS",
+      "port": 9880,
+      "directory": "../TTS工具/GPT-SoVITS",
+      "python": "../TTS工具/GPT-SoVITS/runtime/bin/python3"
+    },
+    "aivis": { "label": "AivisSpeech", "port": 10101 },
+    "voicevox": { "label": "VOICEVOX", "port": 50021, "hidden": true }
+  },
+  "voices": {
+    "roxy": {
+      "engine": "gpt-sovits",
+      "label": "Roxy3.0",
+      "version": "v2ProPlus",
+      "gpt_weights": "../TTS工具/GPT-SoVITS/GPT_weights_v2Pro/Roxy3.0.ckpt",
+      "sovits_weights": "../TTS工具/GPT-SoVITS/SoVITS_weights_v2Pro/Roxy3.0.pth",
+      "reference_transcripts_verified": false,
+      "references": {
+        "neutral": {
+          "audio": "../TTS工具/model/Roxy3.0GSV/参考音频实例/慵懒/じゃあ私の代わりに陛下のその目で人探してもお願いします.wav",
+          "text": "じゃあ私の代わりに陛下のその目で人探してもお願いします。"
+        },
+        "lazy": {
+          "audio": "../TTS工具/model/Roxy3.0GSV/参考音频实例/慵懒/じゃあ私の代わりに陛下のその目で人探してもお願いします.wav",
+          "text": "じゃあ私の代わりに陛下のその目で人探してもお願いします。"
+        },
+        "aggrieved": {
+          "audio": "../TTS工具/model/Roxy3.0GSV/参考音频实例/委屈/だって仕方ないじゃないですか好きなんですよ.wav",
+          "text": "だって仕方ないじゃないですか、好きなんですよ。"
+        },
+        "shy": {
+          "audio": "../TTS工具/model/Roxy3.0GSV/参考音频实例/害羞/えっと、ルーデオスさん、その、ありがとうございました.wav",
+          "text": "えっと、ルーデオスさん、その、ありがとうございました。"
+        },
+        "combat": {
+          "audio": "../TTS工具/model/Roxy3.0GSV/参考音频实例/战斗/ばあ姉よ全てを押し流しあらゆるものを駆逐せよ.wav",
+          "text": "ばあ姉よ、全てを押し流し、あらゆるものを駆逐せよ。"
+        },
+        "affectionate": {
+          "audio": "../TTS工具/model/Roxy3.0GSV/参考音频实例/撒娇/ルディ、ちょっと背中を貸してもらっていいですか.wav",
+          "text": "ルディ、ちょっと背中を貸してもらっていいですか。"
+        },
+        "relieved": {
+          "audio": "../TTS工具/model/Roxy3.0GSV/参考音频实例/欣慰/はいそうですねルディ身長大きくなりましたね.wav",
+          "text": "はい、そうですね、ルディ。身長大きくなりましたね。"
+        },
+        "self_deprecating": {
+          "audio": "../TTS工具/model/Roxy3.0GSV/参考音频实例/自嘲/なるほど、これは鍛えがいがありそうですね.wav",
+          "text": "なるほど、これは鍛えがいがありそうですね。"
+        },
+        "reproachful": {
+          "audio": "../TTS工具/model/Roxy3.0GSV/参考音频实例/责备/もし妊娠でもしてしまったらどうする気なのですかまったく.wav",
+          "text": "もし妊娠でもしてしまったらどうする気なのですか、まったく。"
+        }
+      }
+    },
+    "mao": {
+      "engine": "aivis",
+      "label": "まお",
+      "speaker_name": "まお",
+      "style_name": "ノーマル"
+    },
+    "sayo": {
+      "engine": "voicevox",
+      "label": "小夜/SAYO",
+      "speaker_name": "小夜/SAYO",
+      "style_name": "ノーマル"
+    }
+  }
+}

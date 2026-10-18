@@ -39,6 +39,51 @@ def until(ws, kind):
     raise AssertionError(kind)
 
 
+def test_voice_switch_survives_reconnect_and_preserves_text_mode(tmp_path):
+    import time
+    from test_voice_service import service
+
+    make_client(tmp_path)
+    voices, _ = service(tmp_path)
+    client = TestClient(
+        create_app(tmp_path, model=Model(), capture=Capture(), voice_service=voices)
+    )
+    with client:
+        with client.websocket_connect("/client-ws") as ws:
+            state = until(ws, "status")
+            while state["voice_phase"] != "ready":
+                state = until(ws, "status")
+            assert state["active_voice_key"] == "roxy"
+            ws.send_json({"type": "settings", "muted": True})
+            until(ws, "status")
+            ws.send_json({"type": "text-input", "text": "保留记录"})
+            until(ws, "audio")
+            ws.send_json({"type": "voice-switch", "voice_key": "mao"})
+            state = until(ws, "status")
+            assert state["voice_phase"] == "stopping"
+            ws.send_json({"type": "text-input", "text": "不该写入"})
+            assert "切换" in until(ws, "error")["message"]
+        deadline = time.monotonic() + 4
+        while not voices.ready and time.monotonic() < deadline:
+            time.sleep(0.02)
+        with client.websocket_connect("/client-ws") as ws:
+            state = until(ws, "status")
+            assert state["active_voice_key"] == "mao"
+            rows = until(ws, "history")["items"]
+            assert rows[0]["text"] == "保留记录"
+            assert "不该写入" not in str(rows)
+
+
+def test_injected_voice_never_starts_managed_process_and_rejects_switch(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("COMPANION_MANAGED_VOICES", "1")
+    with make_client(tmp_path) as client, client.websocket_connect("/client-ws") as ws:
+        assert until(ws, "status")["managed_voices"] is False
+        ws.send_json({"type": "voice-switch", "voice_key": "roxy"})
+        assert "托管" in until(ws, "error")["message"]
+
+
 def test_observation_requires_selection_and_defaults_off(tmp_path):
     with make_client(tmp_path) as client, client.websocket_connect("/client-ws") as ws:
         assert not until(ws, "status")["observing"]
@@ -106,3 +151,130 @@ def test_slow_preview_does_not_block_stop(tmp_path):
         assert entered.wait(1)
         ws.send_json({"type": "observe-stop"})
         assert cancelled.wait(1), "stop must cancel preview without waiting for capture"
+
+
+def test_image_capability_is_configuration_not_model_name(tmp_path):
+    import json
+
+    make_client(tmp_path)
+    path = tmp_path / "config/companion.json"
+    config = json.loads(path.read_text())
+    config["supports_vision"] = False
+    path.write_text(json.dumps(config))
+    client = TestClient(
+        create_app(tmp_path, model=Model(), voice=object(), capture=Capture())
+    )
+    with client, client.websocket_connect("/client-ws") as ws:
+        until(ws, "memories")
+        ws.send_json({"type": "preview", "window": 123})
+        until(ws, "preview")
+        ws.send_json({"type": "observe-start", "scene": "fixture"})
+        until(ws, "status")
+        ws.send_json({"type": "look"})
+        assert "图片理解" in until(ws, "error")["message"]
+
+
+def test_external_model_cannot_be_switched_even_with_managed_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMPANION_MANAGED_MODELS", "1")
+    with make_client(tmp_path) as client, client.websocket_connect("/client-ws") as ws:
+        state = until(ws, "status")
+        assert state["managed_models"] is False
+        ws.send_json({"type": "model-switch", "model_key": "qwen38-rp"})
+        assert "托管" in until(ws, "error")["message"]
+
+
+def test_managed_switch_survives_disconnect_preserves_scene_and_history(tmp_path):
+    from test_model_service import service
+
+    make_client(tmp_path)
+    manager, _, _ = service(tmp_path)
+    client = TestClient(
+        create_app(tmp_path, voice=object(), capture=Capture(), model_service=manager)
+    )
+    with client:
+        with client.websocket_connect("/client-ws") as ws:
+            state = until(ws, "status")
+            assert state["active_model_key"] == "27b"
+            until(ws, "memories")
+            ws.send_json({"type": "settings", "muted": True})
+            until(ws, "status")
+            ws.send_json({"type": "preview", "window": 123})
+            until(ws, "preview")
+            until(ws, "status")
+            ws.send_json(
+                {
+                    "type": "observe-start",
+                    "scene": "fixture",
+                    "dialogue_region": [0, 0, 0.5, 0.5],
+                }
+            )
+            assert until(ws, "status")["observing"]
+            ws.send_json({"type": "model-switch", "model_key": "qwen38-rp"})
+            state = until(ws, "status")
+            assert state["model_phase"] == "stopping"
+            assert state["observing"] and state["scene"] == "game:fixture"
+            ws.send_json({"type": "text-input", "text": "不应写入记录"})
+            assert "切换" in until(ws, "error")["message"]
+        # Disconnect must not cancel the service-level task.
+        import time
+
+        deadline = time.monotonic() + 3
+        while not manager.ready and time.monotonic() < deadline:
+            time.sleep(0.02)
+        with client.websocket_connect("/client-ws") as ws:
+            state = until(ws, "status")
+            assert state["active_model_key"] == "qwen38-rp"
+            assert state["model_phase"] == "ready"
+            assert until(ws, "history")["items"] == []
+            pid = manager.process.pid
+            ws.send_json({"type": "thinking-mode", "thinking_mode": "full"})
+            state = until(ws, "status")
+            assert state["thinking_mode"] == "full"
+            assert state["metrics"] == []
+            assert manager.process.pid == pid
+    assert manager.process is None
+
+
+def test_disconnected_interrupt_notification_cannot_abort_accepted_switch(
+    tmp_path, monkeypatch
+):
+    import time
+    from starlette.websockets import WebSocketDisconnect
+    import open_llm_vtuber.companion.app as app_module
+    from open_llm_vtuber.companion.runtime import CompanionRuntime
+    from test_model_service import service
+
+    make_client(tmp_path)
+    manager, _, _ = service(tmp_path)
+
+    class DisconnectedNotification(CompanionRuntime):
+        def __init__(self, store, model, voice, send, persona):
+            async def transport(payload):
+                if (
+                    payload["type"] == "interrupt-signal"
+                    and manager.phase == "stopping"
+                ):
+                    raise WebSocketDisconnect(code=1006)
+                await send(payload)
+
+            super().__init__(store, model, voice, transport, persona)
+
+    monkeypatch.setattr(app_module, "CompanionRuntime", DisconnectedNotification)
+    client = TestClient(
+        create_app(tmp_path, voice=object(), capture=Capture(), model_service=manager)
+    )
+    with client, client.websocket_connect("/client-ws") as ws:
+        until(ws, "memories")
+        ws.send_json({"type": "model-switch", "model_key": "qwen38-rp"})
+        until(ws, "status")
+        deadline = time.monotonic() + 3
+        while manager.task and not manager.task.done() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert manager.active_key == "qwen38-rp"
+        assert manager.error == ""
+
+
+def test_isolated_backend_origin_must_match_actual_loopback_port():
+    assert allowed_origin("http://127.0.0.1:12394", server_port=12394)
+    assert not allowed_origin("http://127.0.0.1:12394", server_port=12393)
+    assert not allowed_origin("https://example.com:12394", server_port=12394)

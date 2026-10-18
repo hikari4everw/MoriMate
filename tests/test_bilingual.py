@@ -29,3 +29,22 @@ def test_final_line_without_newline_and_unknown_emotion():
 def test_bounds_unterminated_generation():
     with pytest.raises(ValueError):
         BilingualParser().feed("x" * 17000)
+
+
+@pytest.mark.parametrize("tone", ["shy", "combat", "self_deprecating"])
+def test_voice_tone_is_independent_of_expression(tone):
+    sentence = BilingualParser().feed(
+        '{"zh":"嗯。","ja":"はい。","emotion":"joy","voice_tone":"' + tone + '"}\n'
+    )[0]
+    assert sentence.emotion == "joy"
+    assert sentence.voice_tone == tone
+
+
+@pytest.mark.parametrize("tone", [None, [], {}, "unknown", 1])
+def test_invalid_voice_tone_falls_back_without_losing_text(tone):
+    import json
+
+    sentence = BilingualParser().feed(
+        json.dumps({"zh": "嗯。", "ja": "はい。", "voice_tone": tone}) + "\n"
+    )[0]
+    assert sentence.voice_tone == "neutral"

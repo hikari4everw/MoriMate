@@ -57,3 +57,53 @@ test('cancel playback preserves queued and later text in the same turn', async (
   await new Promise(r => setTimeout(r, 0));
   assert.deepEqual(played, [1, 2, 3]);
 });
+
+test('text arrives before audio, is deduplicated, and remains valid after stopping speech', () => {
+  const player = new TurnPlayer(async (_n: number) => {}, () => {});
+  assert.equal(player.begin(1), true);
+  assert.equal(player.acceptSentence(1, 1), true);
+  assert.equal(player.acceptSentence(1, 1), false);
+  player.cancelPlayback();
+  assert.equal(player.acceptSentence(1, 2), true);
+  player.stop();
+  assert.equal(player.acceptSentence(1, 3), false);
+  player.begin(2);
+  assert.equal(player.acceptSentence(1, 4), false);
+  assert.equal(player.acceptSentence(2, 1), true);
+});
+
+test('duplicate audio is not replayed and late audio after completion is rejected', async () => {
+  const played: number[] = [];
+  const completed: number[] = [];
+  let release!: () => void;
+  const player = new TurnPlayer(async (n: number) => {
+    played.push(n);
+    await new Promise<void>(r => { release = r; });
+  }, () => {}, turn => completed.push(turn));
+  player.begin(1);
+  player.enqueue(1, 7, 1);
+  player.enqueue(1, 7, 1);
+  player.end(1);
+  release();
+  await new Promise(r => setTimeout(r, 0));
+  player.enqueue(1, 8, 2);
+  assert.deepEqual(played, [7]);
+  assert.deepEqual(completed, [1]);
+  assert.equal(player.begin(1), false);
+});
+
+test('reconnect allows reused sentence IDs in a restarted backend session', () => {
+  const player = new TurnPlayer(async (_n: number) => {}, () => {});
+  player.begin(12);
+  assert.equal(player.acceptSentence(12, 1), true);
+  player.resetSession();
+  player.begin(1);
+  assert.equal(player.acceptSentence(1, 1), true);
+});
+
+test('expired proactive text is dropped even if its socket message arrives late', () => {
+  const player = new TurnPlayer(async (_n: number) => {}, () => {});
+  player.begin(1);
+  assert.equal(player.acceptSentence(1, 1, Date.now() - 1000), false);
+  assert.equal(player.acceptSentence(1, 2, Date.now() + 10000), true);
+});
