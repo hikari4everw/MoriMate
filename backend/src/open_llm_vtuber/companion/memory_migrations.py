@@ -33,3 +33,19 @@ def migrate_v2(db, path):
     else:
         backup_path.unlink(missing_ok=True)
     return {"epoch": 1, "migrated": True}
+
+
+def migrate_provenance(db):
+    columns = {row[1] for row in db.execute('PRAGMA table_info(sources)')}
+    if 'prompt_excluded' in columns:
+        return
+    with db:
+        db.execute('ALTER TABLE sources ADD COLUMN prompt_excluded INTEGER NOT NULL DEFAULT 0')
+        for column, definition in {
+            'state': "TEXT NOT NULL DEFAULT 'active'", 'topic': 'INTEGER',
+            'previous_id': 'INTEGER', 'event_time': 'TEXT', 'created': 'TEXT',
+        }.items():
+            db.execute(f'ALTER TABLE memories ADD COLUMN {column} {definition}')
+        db.execute('UPDATE memories SET topic=id')
+        db.execute('CREATE TABLE source_dependencies(source_id INTEGER NOT NULL,parent_id INTEGER NOT NULL,PRIMARY KEY(source_id,parent_id))')
+        db.execute("INSERT OR IGNORE INTO profile VALUES('_memory_revision','0')")
