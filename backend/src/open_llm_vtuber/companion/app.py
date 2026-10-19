@@ -12,15 +12,37 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from .capture import WindowCapture
+from .guest_server import LanSharing
 from .memory import MemoryStore
 from .model import LocalModel
 from .model_service import ModelService
 from .observation import StableText, CommentGate
 from .runtime import CompanionRuntime
+from .scheduling import GenerationScheduler
 from .voice_service import BUSY_PHASES, VoiceService
 from ..tts.voicevox_tts import TTSEngine
 
 ROOT = Path(__file__).resolve().parents[4]
+
+GUEST_COMMANDS = {
+    "text-input",
+    "interrupt-signal",
+    "stop-speech",
+    "audio-play-start",
+    "frontend-playback-complete",
+    "settings",
+    "memory-delete",
+    "memory-edit",
+    "scene-clear",
+    "memories",
+    "status",
+    "persona-get",
+    "persona-set",
+    "persona-reset",
+    "model-switch",
+    "voice-switch",
+    "thinking-mode",
+}
 
 
 def allowed_origin(origin, server_port=12393):
@@ -110,6 +132,12 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app):
         app.state.connected = False
+        app.state.sharing = LanSharing(root, websocket, revoke)
+        mount_assets(app.state.sharing.app)
+        if manager:
+            manager.on_change = broadcast_model_change
+        if voices:
+            voices.on_change = broadcast_voice_change
         try:
             if manager:
                 await manager.start(os.environ.get("COMPANION_MODEL_KEY", "27b"))
@@ -122,6 +150,7 @@ def create_app(
                 )
             yield
         finally:
+            await app.state.sharing.close()
             if voices:
                 await voices.close()
             if manager:
@@ -132,6 +161,40 @@ def create_app(
     app = FastAPI(lifespan=lifespan)
     app.state.model_service = manager
     app.state.voice_service = voices
+    connections = {}
+    scheduler = GenerationScheduler()
+    changed_by = ""
+
+    async def broadcast_model_change():
+        for connection in list(connections.values()):
+            with contextlib.suppress(Exception):
+                await connection["model_changed"]()
+
+    async def broadcast_voice_change():
+        for connection in list(connections.values()):
+            with contextlib.suppress(Exception):
+                await connection["voice_changed"]()
+
+    async def revoke(guest_id, code, reason):
+        connection = connections.get(guest_id)
+        if connection:
+            connection["close"] = (code, reason)
+            connection["revoked"].set()
+            await connection["done"].wait()
+
+    async def stop_all():
+        for connection in list(connections.values()):
+            await connection["stop"]()
+
+    async def share_status():
+        sharing = app.state.sharing
+        owner = connections.get("owner")
+        if owner:
+            with contextlib.suppress(Exception):
+                await owner["send"](
+                    sharing.snapshot(sum(key != "owner" for key in connections))
+                )
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -205,17 +268,34 @@ def create_app(
             **voice_state(),
         }
 
+    @app.get("/api/session")
+    async def session():
+        return {"role": "owner", "authenticated": True}
+
     @app.websocket("/client-ws")
-    async def websocket(ws: WebSocket):
-        nonlocal changing_thinking
-        if (
-            not allowed_origin(ws.headers.get("origin"), ws.url.port)
-            or app.state.connected
-        ):
+    async def owner_websocket(ws: WebSocket):
+        await websocket(ws)
+
+    async def websocket(ws: WebSocket, guest=None):
+        nonlocal changing_thinking, changed_by
+        owner = guest is None
+        identity = "owner" if owner else guest["id"]
+        if owner and not allowed_origin(ws.headers.get("origin"), ws.url.port):
             await ws.close(code=1008)
             return
+        if identity in connections:
+            await ws.accept()
+            await ws.close(code=4409, reason="此身份已有聊天页面，请先关闭原页面")
+            return
+        connection = {
+            "revoked": asyncio.Event(),
+            "done": asyncio.Event(),
+            "close": None,
+        }
+        connections[identity] = connection
+        if owner:
+            app.state.connected = True
         await ws.accept()
-        app.state.connected = True
         lock = asyncio.Lock()
 
         async def send(payload):
@@ -223,12 +303,17 @@ def create_app(
                 await ws.send_json(payload)
 
         runtime = CompanionRuntime(
-            app.state.store,
+            app.state.store
+            if owner
+            else MemoryStore(app.state.sharing.registry.database(identity)),
             manager.transport if manager and manager.transport else model,
             voice,
             send,
             (root / "config/persona.md").read_text(),
         )
+        runtime.persona = runtime.store.persona(runtime.persona)
+        runtime.scheduler = scheduler
+        runtime.priority = 0 if owner else 1
         runtime.can_generate = model_ready
         gate, stable = CommentGate(), StableText()
         selected = None
@@ -242,18 +327,33 @@ def create_app(
         capture_task = None
 
         async def status():
+            services = {**model_state(), **voice_state()}
+            if not owner:
+                # Model process paths and diagnostic details belong to the host.
+                services.pop("model", None)
+                for key in (
+                    "model_error",
+                    "model_recovery",
+                    "voice_error",
+                    "voice_recovery",
+                ):
+                    if services.get(key):
+                        services[key] = "共享服务发生错误，请联系主人或重试"
             await send(
                 {
                     "type": "status",
+                    "role": "owner" if owner else "guest",
+                    "guest_label": guest["label"] if guest else None,
+                    "capabilities": {"observe": owner, "admin": owner},
+                    "changed_by": changed_by,
                     "muted": runtime.muted,
                     "proactive": gate.enabled,
                     "intensity": gate.intensity,
                     "observing": observing,
-                    "window": selected,
+                    **({"window": selected} if owner else {}),
                     "scene": runtime.scene,
                     "busy": runtime.busy,
-                    **model_state(),
-                    **voice_state(),
+                    **services,
                     "metrics": runtime.metrics,
                     "summary": runtime.store.summary(runtime.scene),
                 }
@@ -265,7 +365,7 @@ def create_app(
             playing = False
             if manager.phase == "stopping":
                 with contextlib.suppress(Exception):
-                    await runtime.stop()
+                    await stop_connection()
             runtime.metrics.clear()
             if manager.ready:
                 runtime.model = manager.transport
@@ -273,21 +373,15 @@ def create_app(
             with contextlib.suppress(Exception):
                 await status()
 
-        if manager:
-            manager.on_change = model_changed
-
         async def voice_changed():
             nonlocal latest, playing
             latest, playing = None, False
             if voices.phase == "stopping":
                 with contextlib.suppress(Exception):
-                    await runtime.stop()
+                    await stop_connection()
             runtime.metrics.clear()
             with contextlib.suppress(Exception):
                 await status()
-
-        if voices:
-            voices.on_change = voice_changed
 
         async def history():
             await send(
@@ -378,6 +472,50 @@ def create_app(
                     await capture_task
                 capture_task = None
 
+        async def stop_connection():
+            nonlocal latest, playing
+            latest, playing = None, False
+            await cancel_capture()
+            with contextlib.suppress(Exception):
+                await runtime.stop()
+
+        async def persona():
+            await send(
+                {
+                    "type": "persona",
+                    "text": runtime.persona,
+                    "default": (root / "config/persona.md").read_text(),
+                }
+            )
+
+        async def guest_list():
+            await send(
+                {
+                    "type": "guests-list",
+                    "items": [
+                        {**item, "online": item["id"] in connections}
+                        for item in app.state.sharing.registry.list()
+                    ],
+                }
+            )
+
+        async def receive():
+            pending = asyncio.create_task(ws.receive_json())
+            revoked = asyncio.create_task(connection["revoked"].wait())
+            try:
+                done, _ = await asyncio.wait(
+                    [pending, revoked], return_when=asyncio.FIRST_COMPLETED
+                )
+                if revoked in done:
+                    return None
+                return pending.result()
+            finally:
+                with anyio.CancelScope(shield=True):
+                    for task in (pending, revoked):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(pending, revoked, return_exceptions=True)
+
         async def launch_capture(operation):
             nonlocal capture_task
             await cancel_capture()
@@ -392,13 +530,31 @@ def create_app(
             capture_task = asyncio.create_task(run())
 
         maintenance_task = asyncio.create_task(maintenance_loop())
+        connection.update(
+            send=send,
+            stop=stop_connection,
+            model_changed=model_changed,
+            voice_changed=voice_changed,
+        )
         try:
             await status()
             await history()
+            await share_status()
             while True:
-                data = await ws.receive_json()
+                data = await receive()
+                if data is None:
+                    break
+                if not isinstance(data, dict):
+                    await send({"type": "error", "message": "请求格式无效"})
+                    continue
                 kind = data.get("type")
                 try:
+                    if not owner:
+                        if kind not in GUEST_COMMANDS or (
+                            kind == "settings" and set(data) - {"type", "muted"}
+                        ):
+                            raise ValueError("没有权限执行此操作")
+                        app.state.sharing.registry.touch(identity)
                     if kind in {"text-input", "look"} and not model_ready():
                         raise RuntimeError(
                             "模型或语音正在切换，或模型不可用，请等待就绪后发送"
@@ -418,6 +574,12 @@ def create_app(
                     } or (kind == "settings" and data.get("muted")):
                         await cancel_capture()
                     if kind in {"model-switch", "thinking-mode"}:
+                        if changing_thinking or (
+                            manager and manager.task and not manager.task.done()
+                        ):
+                            raise RuntimeError("模型正在切换，请稍候")
+                        if voices and voices.task and not voices.task.done():
+                            raise RuntimeError("语音正在切换，请稍候")
                         if voices and voices.phase in BUSY_PHASES:
                             raise RuntimeError("语音正在切换，请稍候")
                         if not manager:
@@ -431,6 +593,13 @@ def create_app(
                             "qwen38-rp",
                         }:
                             raise ValueError("模型选择无效")
+                        if kind == "thinking-mode" and (
+                            manager.active_key != "qwen38-rp"
+                            or data.get("thinking_mode")
+                            not in {"off", "limited", "full"}
+                        ):
+                            raise ValueError("当前模型不支持此思考档位")
+                        changed_by = "主人" if owner else guest["label"]
                         playing, latest = False, None
                         runtime.metrics.clear()
                         last_activity = time.monotonic()
@@ -439,15 +608,23 @@ def create_app(
                         else:
                             changing_thinking = True
                             try:
-                                await runtime.stop()
+                                await stop_all()
+                                manager.set_thinking(data.get("thinking_mode"))
                             finally:
                                 changing_thinking = False
-                            manager.set_thinking(data.get("thinking_mode"))
+                            await broadcast_model_change()
                     elif kind == "voice-switch":
                         if not voices:
                             raise ValueError("当前语音未启用托管，不能在界面切换")
                         if manager and manager.phase in BUSY_PHASES:
                             raise RuntimeError("模型正在切换，请稍候")
+                        if changing_thinking or (
+                            manager and manager.task and not manager.task.done()
+                        ):
+                            raise RuntimeError("模型正在切换，请稍候")
+                        if voices.task and not voices.task.done():
+                            raise RuntimeError("语音正在切换，请稍候")
+                        changed_by = "主人" if owner else guest["label"]
                         voices.request_switch(data.get("voice_key"))
                         playing, latest = False, None
                         last_activity = time.monotonic()
@@ -575,12 +752,87 @@ def create_app(
                         await history()
                     elif kind == "memories":
                         await history()
+                    elif kind == "persona-get":
+                        await persona()
+                    elif kind in {"persona-set", "persona-reset"}:
+                        value = data.get("text") if kind == "persona-set" else None
+                        if kind == "persona-set" and not isinstance(value, str):
+                            raise ValueError("人格提示词需为 1–16000 字")
+                        # Validate before interrupting a valid in-flight reply.
+                        if value is not None and (
+                            not value.strip() or len(value) > 16000
+                        ):
+                            raise ValueError("人格提示词需为 1–16000 字")
+                        await stop_connection()
+                        runtime.store.save_persona(value)
+                        runtime.persona = runtime.store.persona(
+                            (root / "config/persona.md").read_text()
+                        )
+                        runtime.mood, runtime.mood_changed = "neutral", 0.0
+                        await persona()
+                    elif kind == "sharing-status":
+                        app.state.sharing.refresh_addresses()
+                        await share_status()
+                    elif kind in {
+                        "sharing-enable",
+                        "sharing-disable",
+                        "sharing-password-set",
+                    }:
+                        sharing = app.state.sharing
+                        if kind == "sharing-enable":
+                            await sharing.enable(data.get("address"))
+                        elif kind == "sharing-disable":
+                            await sharing.disable()
+                        else:
+                            await sharing.change_password(data.get("password"))
+                        await share_status()
+                    elif kind == "guests-list":
+                        await guest_list()
+                    elif kind in {"guest-history", "guest-memories"}:
+                        guest_id = data.get("guest_id")
+                        store = MemoryStore(
+                            app.state.sharing.registry.database(guest_id)
+                        )
+                        try:
+                            before = data.get("before")
+                            if before is not None and (
+                                not isinstance(before, int) or before < 1
+                            ):
+                                raise ValueError("历史分页参数无效")
+                            rows = (
+                                store.history_page(before)
+                                if kind == "guest-history"
+                                else store.memories()
+                            )
+                            await send(
+                                {
+                                    "type": kind,
+                                    "guest_id": guest_id,
+                                    "items": rows,
+                                    "next_before": rows[0]["id"]
+                                    if kind == "guest-history" and len(rows) == 60
+                                    else None,
+                                }
+                            )
+                        finally:
+                            store.close()
+                    elif kind in {"guest-delete", "guests-clear"}:
+                        sharing = app.state.sharing
+                        ids = (
+                            [data.get("guest_id")]
+                            if kind == "guest-delete"
+                            else [item["id"] for item in sharing.registry.list()]
+                        )
+                        for guest_id in ids:
+                            await sharing.delete(guest_id)
+                        await guest_list()
+                        await share_status()
                     elif kind != "status":
                         raise ValueError("未知请求")
                     await status()
                 except (ValueError, KeyError, RuntimeError, OSError) as exc:
                     await send({"type": "error", "message": str(exc)})
-        except WebSocketDisconnect:
+        except (WebSocketDisconnect, asyncio.CancelledError):
             pass
         finally:
             # TestClient and ASGI shutdown can cancel the handler during cleanup.
@@ -594,16 +846,27 @@ def create_app(
                     with contextlib.suppress(Exception):
                         await runtime.stop()
                 finally:
-                    if manager and manager.on_change is model_changed:
-                        manager.on_change = None
-                    if voices and voices.on_change is voice_changed:
-                        voices.on_change = None
-                    app.state.connected = False
+                    connections.pop(identity, None)
+                    if owner:
+                        app.state.connected = False
+                    else:
+                        runtime.store.close()
+                    if connection["close"]:
+                        code, reason = connection["close"]
+                        with contextlib.suppress(Exception):
+                            await ws.close(code=code, reason=reason)
+                    connection["done"].set()
+                    await share_status()
 
-    assets = root / "backend/live2d-models"
-    assets.mkdir(exist_ok=True)
-    app.mount("/live2d-models", StaticFiles(directory=assets), name="models")
-    frontend = root / "desktop/out/renderer"
-    if frontend.exists():
-        app.mount("/", StaticFiles(directory=frontend, html=True), name="desktop")
+    def mount_assets(target):
+        assets = root / "backend/live2d-models"
+        assets.mkdir(exist_ok=True)
+        target.mount("/live2d-models", StaticFiles(directory=assets), name="models")
+        frontend = root / "desktop/out/renderer"
+        if frontend.exists():
+            target.mount(
+                "/", StaticFiles(directory=frontend, html=True), name="desktop"
+            )
+
+    mount_assets(app)
     return app

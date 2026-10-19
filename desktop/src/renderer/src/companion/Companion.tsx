@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChakraProvider, defaultSystem } from '@chakra-ui/react';
 import { ModeProvider, useMode } from '../context/mode-context';
 import { useLive2DModel } from '../hooks/canvas/use-live2d-model';
@@ -6,6 +6,8 @@ import { useLive2DResize } from '../hooks/canvas/use-live2d-resize';
 import { LAppWavFileHandler } from '../../WebSDK/src/lappwavfilehandler';
 import { audioManager } from '../utils/audio-manager';
 import { TurnPlayer } from './turn-player';
+import { AccessGate, type Session } from './access-gate';
+import { PersonaPanel, SharingPanel, type PanelInbox } from './sharing-panels';
 import './companion.css';
 
 const BASE = window.location.protocol === 'http:' && window.location.port !== '5173'
@@ -19,6 +21,7 @@ type WindowItem = { id: number; app: string; title: string };
 type AudioPacket = { turn_id: number; sentence_id: number; audio: string | null; display_text: { text: string }; tts_text: string; expires_at_ms?: number; actions?: { expressions?: string[] } };
 type VoiceProfile = { key: string; label: string; engine: string; engine_label: string };
 type Status = { observing: boolean; muted: boolean; proactive: boolean; intensity: string; scene: string;
+  role?: 'owner' | 'guest'; guest_label?: string; capabilities?: { observe: boolean; admin: boolean }; changed_by?: string;
   voice_label?: string; model?: string; managed_models?: boolean; active_model_key?: string | null;
   target_model_key?: string | null; thinking_mode?: string; available_models?: { key: string; label: string }[];
   model_phase?: string; model_error?: string; model_recovery?: string; failed_model_key?: string | null;
@@ -34,7 +37,7 @@ function Avatar() {
   return <div className="avatar" ref={containerRef} {...handlers}><canvas id="canvas" ref={canvasRef} /></div>;
 }
 
-function Companion() {
+function Companion({ session, onSessionExpired }: { session: Session; onSessionExpired: (reason: string) => void }) {
   const { mode, setMode, isElectron } = useMode();
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState<Status>({ observing: false, muted: false, proactive: true, intensity: 'natural', scene: 'daily', metrics: [] });
@@ -57,16 +60,22 @@ function Companion() {
   const [configPending, setConfigPending] = useState(false);
   const [voicePending, setVoicePending] = useState(false);
   const [tab, setTab] = useState('chat');
+  const [panelMessages, setPanelMessages] = useState<PanelInbox>({});
+  const [reconnectKey, setReconnectKey] = useState(0);
+  const [audioReady, setAudioReady] = useState(false);
+  const audioElement = useRef<HTMLAudioElement | null>(null);
+  const isOwner = session.role === 'owner';
+  const canObserve = isOwner && status.capabilities?.observe !== false;
   const socket = useRef<WebSocket | null>(null);
   const player = useRef<TurnPlayer<AudioPacket> | null>(null);
   const silent = useRef(false);
   const muted = useRef(false);
   const cropStart = useRef<[number, number] | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
-  const send = (data: object) => {
+  const send = useCallback((data: object) => {
     if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(data));
     else setError('本地服务未连接，请运行启动脚本。');
-  };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -98,7 +107,9 @@ function Companion() {
       if (!current() || (packet.expires_at_ms && Date.now() >= packet.expires_at_ms)) { wav.releasePcmData(); return; }
       if (model) model._wavFileHandler = wav;
       await new Promise<void>((resolve, reject) => {
-        const audio = new Audio(url);
+        const audio = audioElement.current || new Audio();
+        audioElement.current = audio;
+        audio.src = url;
         audioManager.setCurrentAudio(audio, model);
         const finish = () => {
           audioManager.clearCurrentAudio(audio);
@@ -117,7 +128,7 @@ function Companion() {
           send({ type: 'audio-play-start', turn_id: packet.turn_id });
         };
         if (!current()) { finish(); return; }
-        audio.play().catch(reason => { finish(); reject(reason); setError('播放被阻止，请点击界面后再发一句话。'); });
+        audio.play().catch(reason => { finish(); reject(reason); setAudioReady(false); setError('播放被阻止，请点击“启用声音”，再发送消息。'); });
       });
     }, stopAudio, turn => {
       clearWait();
@@ -132,6 +143,7 @@ function Companion() {
       ws.onmessage = event => {
         if (socket.current !== ws) return;
         const data = JSON.parse(event.data);
+        if (['persona', 'sharing-status', 'guests-list', 'guest-history', 'guest-memories', 'error'].includes(data.type)) setPanelMessages(previous => ({ ...previous, [data.type]: data }));
         if (data.type === 'status') { setStatus(data); setConfigPending(false); setVoicePending(false); muted.current = data.muted; }
         if (data.type === 'history') setHistory(data.items.filter((i: History) => i.kind !== 'observation'));
         if (data.type === 'memories') setMemories(data.items);
@@ -142,6 +154,11 @@ function Companion() {
         if (data.type === 'memory-updated') send({ type: 'memories' });
         if (data.type === 'speech-stopped') { silent.current = true; queue.cancelPlayback(); }
         if (data.type === 'interrupt-signal') { queue.stop(); setBusy(false); }
+        if (data.type === 'queue-status' && queue.accepts(data.turn_id)) {
+          clearTimeout(waitTimer);
+          if (data.state === 'waiting') { setBusy(true); setWaiting('正在排队，主人请求优先；可随时停止或更换消息。'); }
+          if (data.state === 'running') { setWaiting('正在生成回复…'); }
+        }
         if (data.type === 'control' && data.text === 'conversation-chain-start' && queue.begin(data.turn_id)) {
           silent.current = false; setBusy(true); textReceived = false;
           waitTimer = setTimeout(() => setWaiting(textReceived ? '文字已显示，正在准备语音…' : '还在认真想，可以随时发新消息打断。'), data.wait_after_ms || 8000);
@@ -159,16 +176,19 @@ function Companion() {
           queue.enqueue(data.turn_id, data, data.sentence_id);
         }
       };
-      ws.onclose = () => {
+      ws.onclose = event => {
         if (socket.current !== ws) return;
         queue.stop(); setConnected(false); setBusy(false); setConfigPending(false); setVoicePending(false);
         setStatus(old => ({ ...old, observing: false }));
-        if (!disposed) reconnect = setTimeout(connect, 2500);
+        if (disposed) return;
+        if (!isOwner && [4401, 4403].includes(event.code)) { onSessionExpired(event.reason || '登录已失效，请重新输入访问密码。'); return; }
+        if (event.code === 4409 || event.code === 1008) { setError(event.reason || '已有聊天页面连接，请关闭原页面后点击重新连接。'); return; }
+        reconnect = setTimeout(connect, 2500);
       };
     };
     connect();
     return () => { disposed = true; clearTimeout(reconnect); clearTimeout(waitTimer); queue.stop(); socket.current?.close(); };
-  }, []);
+  }, [isOwner, onSessionExpired, reconnectKey, send]);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [history]);
   useEffect(() => { document.body.classList.toggle('pet-view', mode === 'pet'); }, [mode]);
@@ -202,6 +222,21 @@ function Companion() {
     send({ type: 'text-input', text }); setInput(''); setError('');
   };
   const settings = (values: object) => send({ type: 'settings', ...values });
+  const unlockAudio = async () => {
+    const bytes = new Uint8Array(204);
+    const view = new DataView(bytes.buffer);
+    const ascii = (offset: number, text: string) => [...text].forEach((letter, index) => view.setUint8(offset + index, letter.charCodeAt(0)));
+    ascii(0, 'RIFF'); view.setUint32(4, 196, true); ascii(8, 'WAVEfmt ');
+    view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, 8000, true); view.setUint32(28, 16000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    ascii(36, 'data'); view.setUint32(40, 160, true);
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
+    const audio = audioElement.current || new Audio(); audioElement.current = audio;
+    audio.onended = null; audio.onerror = null; audio.onplaying = null; audio.src = url;
+    try { await audio.play(); setAudioReady(true); setError(''); }
+    catch { setError('声音仍被浏览器阻止，请检查网站的声音播放权限。'); }
+    finally { URL.revokeObjectURL(url); }
+  };
   const point = (event: React.PointerEvent<HTMLDivElement>): [number, number] => {
     const box = event.currentTarget.getBoundingClientRect();
     return [Math.max(0, Math.min(1, (event.clientX - box.left) / box.width)), Math.max(0, Math.min(1, (event.clientY - box.top) / box.height))];
@@ -215,10 +250,13 @@ function Companion() {
   const renderRegion = (value: Region | null, className: string) => value && <div className={`crop ${className}`} style={{ left: `${value[0] * 100}%`, top: `${value[1] * 100}%`, width: `${value[2] * 100}%`, height: `${value[3] * 100}%` }} />;
 
   return <main className={`companion ${mode}`}>
-    <header><strong>Hiyori <small>本地陪伴</small></strong><span className={connected ? 'online' : ''}>{connected ? busy ? waiting || '正在回应…' : '已连接' : '等待本地服务'}</span>
+    <header><strong>Hiyori <small>{isOwner ? '本地陪伴' : `${session.guest?.label || '访客'} · 独立空间`}</small></strong><span className={connected ? 'online' : ''}>{connected ? busy ? waiting || '正在回应…' : '已连接' : '等待服务连接'}</span>
+      {!connected && <button onClick={() => setReconnectKey(key => key + 1)}>重新连接</button>}
+      {!isOwner && <button onClick={async () => { try { await fetch(`${BASE}/api/logout`, { method: 'POST' }); onSessionExpired('已退出，浏览器身份已保留。'); } catch { setError('服务不可用，暂时无法退出。'); } }}>退出</button>}
       {isElectron && <button onClick={() => setMode(mode === 'pet' ? 'window' : 'pet')}>{mode === 'pet' ? '展开' : '桌宠'}</button>}</header>
     <section className="stage"><Avatar /><div className="subtitle">{subtitle}<small>{japanese}</small></div></section>
     <section className="panel">
+      <details className="shared-config"><summary>模型与声音设置 · 修改影响所有在线用户</summary>
       <div className="model-controls" aria-label="模型设置">
         <label>模型<select aria-label="选择模型" value={(modelSwitching ? status.target_model_key : status.active_model_key) || ''} disabled={!connected || switching || !status.managed_models} onChange={e => changeModelConfig({ type: 'model-switch', model_key: e.target.value })}>
           {!status.managed_models && <option value="">外部服务 · {status.model || '当前模型'}</option>}
@@ -243,9 +281,13 @@ function Companion() {
         <small role="status">{voiceSwitching ? `${voicePhaseLabel[status.voice_phase || ''] || '正在切换语音'} · ${selectedVoice?.label || ''}` : status.voice_phase === 'error' ? voicePhaseLabel.error : `当前声音：${status.voice_label || '本地语音'} · 自动语气`}</small>
         {status.voice_error && <div role="alert" className="error">{status.voice_error}<br />{status.voice_recovery}<button disabled={!connected || switching} onClick={() => changeVoice(status.failed_voice_key || status.target_voice_key || selectedVoice?.key)}>重试语音</button></div>}
       </div>
-      <nav>{[['chat', '聊天'], ['observe', '观察'], ['memory', '记忆']].map(([key, label]) => <button key={key} className={tab === key ? 'selected' : ''} onClick={() => setTab(key)}>{label}</button>)}</nav>
+      {status.changed_by && <small role="status">最近由{status.changed_by}调整共享配置</small>}
+      </details>
+      <nav>{[['chat', '聊天'], ...(canObserve ? [['observe', '观察']] : []), ['memory', '记忆'], ['persona', '人格'], ...(isOwner ? [['sharing', '共享']] : [])].map(([key, label]) => <button key={key} className={tab === key ? 'selected' : ''} onClick={() => setTab(key)}>{label}</button>)}</nav>
+      {tab === 'persona' && <PersonaPanel send={send} messages={panelMessages} connected={connected} />}
+      {tab === 'sharing' && isOwner && <SharingPanel send={send} messages={panelMessages} connected={connected} />}
       {tab === 'chat' && <div className="history">{history.map((item, i) => <article key={`${item.id}-${i}`} className={item.kind}><small>{item.kind === 'user' ? '你' : 'Hiyori'}</small><p>{item.text}</p></article>)}<div ref={endRef} /></div>}
-      {tab === 'observe' && <div className="settings scroll">
+      {tab === 'observe' && canObserve && <div className="settings scroll">
         <p>只捕获你选择的窗口。首次使用需在 macOS「屏幕与系统音频录制」中授权启动终端或应用。</p>
         <button onClick={() => send({ type: 'windows' })}>刷新窗口列表</button>
         <select value={selected} onChange={e => { setSelected(e.target.value); setPreview(''); }}><option value="">选择虚拟机窗口</option>{windows.map(item => <option key={item.id} value={item.id}>{item.app} · {item.title || '(无标题)'}</option>)}</select>
@@ -265,10 +307,12 @@ function Companion() {
       </div>}
       {tab === 'memory' && <div className="settings scroll"><p>记忆只从明确来源整理。纠正或删除会同时作废关联摘要与历史，避免旧内容重新出现。</p><button onClick={() => send({ type: 'memories' })}>刷新记忆</button>{memories.length === 0 && <p>还没有长期记忆；聊几轮后会在空闲时整理。</p>}{memories.map(memory => <MemoryCard key={`${memory.id}-${memory.text}`} memory={memory} send={send} />)}<hr /><button onClick={() => { if (window.confirm('清除当前场景的对话、摘要和关联记忆？')) send({ type: 'scene-clear' }); }}>清除当前场景记录</button></div>}
       <div className="controls">
-        <button onClick={() => { send({ type: 'observe-stop' }); }} disabled={!status.observing}>停止观察</button>
-        <button onClick={() => settings({ proactive: !status.proactive })}>{status.proactive ? '禁止主动发言' : '允许主动发言'}</button>
+        {canObserve && <button onClick={() => { send({ type: 'observe-stop' }); }} disabled={!status.observing}>停止观察</button>}
+        {canObserve && <button onClick={() => settings({ proactive: !status.proactive })}>{status.proactive ? '禁止主动发言' : '允许主动发言'}</button>}
         <button onClick={() => { if (!status.muted) { silent.current = true; player.current?.cancelPlayback(); } settings({ muted: !status.muted }); }}>{status.muted ? '恢复声音' : '静音'}</button>
         <button onClick={stopSpeech}>停止当前语音</button>
+        <button disabled={!busy} onClick={stop}>停止回复／排队</button>
+        {!audioReady && <button disabled={busy} onClick={() => void unlockAudio()}>启用声音</button>}
       </div>
       {error && <div role="alert" className="error" onClick={() => setError('')}>{error}</div>}
       <form onSubmit={e => { e.preventDefault(); submit(); }}><input aria-label="输入中文消息" value={input} maxLength={4000} onChange={e => setInput(e.target.value)} placeholder="想聊点什么？" /><button className="primary" disabled={!connected || modelUnavailable || !input.trim()}>发送</button></form>
@@ -283,5 +327,5 @@ function MemoryCard({ memory, send }: { memory: Memory; send: (data: object) => 
 }
 
 export default function LocalCompanion() {
-  return <ChakraProvider value={defaultSystem}><ModeProvider><Companion /></ModeProvider></ChakraProvider>;
+  return <ChakraProvider value={defaultSystem}><ModeProvider><AccessGate base={BASE}>{(session, expire) => <Companion session={session} onSessionExpired={expire} />}</AccessGate></ModeProvider></ChakraProvider>;
 }

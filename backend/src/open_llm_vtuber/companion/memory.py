@@ -25,6 +25,9 @@ class MemoryStore:
             CREATE TABLE IF NOT EXISTS summaries (
                 scene TEXT PRIMARY KEY, text TEXT NOT NULL, source_ids TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS profile (
+                key TEXT PRIMARY KEY, value TEXT NOT NULL
+            );
         """)
 
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(sources)")}
@@ -46,6 +49,33 @@ class MemoryStore:
 
     def close(self):
         self.db.close()
+
+    def persona(self, default: str) -> str:
+        row = self.db.execute(
+            "SELECT value FROM profile WHERE key='persona'"
+        ).fetchone()
+        return row[0] if row else default
+
+    def save_persona(self, text: str | None):
+        if text is not None and (
+            not isinstance(text, str) or not text.strip() or len(text) > 16000
+        ):
+            raise ValueError("人格提示词需为 1–16000 字，且不能全为空白")
+        with self.db:
+            if text is None:
+                self.db.execute("DELETE FROM profile WHERE key='persona'")
+            else:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO profile VALUES ('persona', ?)", (text,)
+                )
+
+    def history_page(self, before: int | None = None, limit: int = 60) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT * FROM sources WHERE redacted=0 AND (? IS NULL OR id<?) "
+            "ORDER BY id DESC LIMIT ?",
+            (before, before, limit),
+        ).fetchall()
+        return [dict(row) for row in reversed(rows)]
 
     def add_source(
         self, kind: str, text: str, scene: str = "daily", speech: str | None = None

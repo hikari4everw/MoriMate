@@ -15,13 +15,10 @@ from ..utils.stream_audio import prepare_audio_payload
 FORMAT = """只输出 NDJSON，每行一个完整短句对象：
 {"zh":"中文短句。","ja":"同义的自然日语短句。","emotion":"neutral","voice_tone":"neutral"}
 只用上述字段表达正式回复，不输出 Markdown 或思考过程。每行是一个播报短句，不是完整回复的长度限制。
-按用户目的决定总篇幅：闲聊自然简短；故事、详细解释充分展开。只说“讲个故事”时，中文以800字左右为目标（500–1000字），有情节发展和结尾；用户指定篇幅时优先遵从。
 日语全文与中文语义对应，第一句尽量不超过30字，每个播报短句尽量不超过60字，长内容拆成多行继续输出。
-用语气、观点和内容体现人格，日常直接说话，故事以外不加动作或心理旁白。共同梗低频使用，避免连续几轮相同开场和无意义强调；人名与必要术语正常重复。
 当前时间是现实时间；历史中的“昨天”等相对时间以那条资料的记录时间理解。记录时间不等于事件发生时间，游戏内时间也独立于现实时间；缺少来源就承认不知道。
 emotion只控制表情，为neutral/joy/smirk/sadness/anger/surprise。
 voice_tone只控制声音语气，为neutral(默认)/aggrieved(委屈)/shy(害羞)/lazy(慵懒)/combat(战斗)/affectionate(撒娇)/relieved(欣慰)/self_deprecating(自嘲)/reproachful(责备)。
-语气自然克制，普通聊天优先neutral，其他语气须有明确语境，不为追求变化频繁切换；combat仅明确战斗演绎时使用，reproachful仅明确责备语境使用。声音语气不改变人格或中文日语语义。
 不要声称自己读到了未提供的游戏内容。"""
 
 
@@ -93,6 +90,8 @@ class CompanionRuntime:
         self.is_proactive = False
         self.mood = "neutral"
         self.mood_changed = 0.0
+        self.scheduler = None
+        self.priority = 0
 
     async def stop_speech(self):
         self.silenced_turn = self.turn_id
@@ -230,6 +229,50 @@ class CompanionRuntime:
             )
 
     async def _run(
+        self, turn, messages, expires_at=None, *, max_tokens=8192, reasoning_budget=128
+    ):
+        if self.scheduler is None:
+            return await self._run_reply(
+                turn,
+                messages,
+                expires_at,
+                max_tokens=max_tokens,
+                reasoning_budget=reasoning_budget,
+            )
+        await self.send({"type": "queue-status", "state": "waiting", "turn_id": turn})
+        try:
+            async with self.scheduler.slot(2 if self.is_proactive else self.priority):
+                if turn != self.turn_id:
+                    return
+                if not self.can_generate() or (
+                    expires_at is not None and time.monotonic() >= expires_at
+                ):
+                    await self.send(
+                        {
+                            "type": "control",
+                            "text": "conversation-chain-end",
+                            "turn_id": turn,
+                        }
+                    )
+                    return
+                await self.send(
+                    {"type": "queue-status", "state": "running", "turn_id": turn}
+                )
+                await self._run_reply(
+                    turn,
+                    messages,
+                    expires_at,
+                    max_tokens=max_tokens,
+                    reasoning_budget=reasoning_budget,
+                )
+        finally:
+            if turn == self.turn_id:
+                self.busy = False
+                await self.send(
+                    {"type": "queue-status", "state": "idle", "turn_id": turn}
+                )
+
+    async def _run_reply(
         self, turn, messages, expires_at=None, *, max_tokens=8192, reasoning_budget=128
     ):
         # Text pairs are bounded by max_tokens; slow TTS must not delay text delivery.
@@ -387,6 +430,12 @@ class CompanionRuntime:
             self.metrics = self.metrics[-100:]
 
     async def consolidate(self):
+        async with (
+            self.scheduler.slot(2) if self.scheduler else contextlib.nullcontext()
+        ):
+            await self._consolidate()
+
+    async def _consolidate(self):
         """Called only while idle. Every source is validated again before saving."""
         rows = [s for s in self.store.sources(self.scene, 120) if not s["processed"]]
         if len(rows) < 6:
