@@ -9,6 +9,8 @@ class MemoryStore:
 
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = Path(path)
+        self.current_turn = None
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
@@ -47,6 +49,21 @@ class MemoryStore:
                             (rows[0]["scene"] if rows else "unknown", memory["id"]),
                         )
 
+        self.migrate_v2()
+
+    def migrate_v2(self):
+        from .memory_migrations import migrate_v2
+        result = migrate_v2(self.db, self.path)
+        self.epoch = result["epoch"]
+        return result
+
+    def archive(self, before=None, limit=60):
+        return {
+            "sources": self.history_page(before, limit, archive=True),
+            "memories": self.memories(archive=True),
+            "summaries": [dict(row) for row in self.db.execute("SELECT * FROM summaries WHERE epoch=0")],
+        }
+
     def close(self):
         self.db.close()
 
@@ -69,11 +86,11 @@ class MemoryStore:
                     "INSERT OR REPLACE INTO profile VALUES ('persona', ?)", (text,)
                 )
 
-    def history_page(self, before: int | None = None, limit: int = 60) -> list[dict]:
+    def history_page(self, before: int | None = None, limit: int = 60, *, archive=False) -> list[dict]:
         rows = self.db.execute(
-            "SELECT * FROM sources WHERE redacted=0 AND (? IS NULL OR id<?) "
+            "SELECT * FROM sources WHERE redacted=0 AND epoch=? AND (? IS NULL OR id<?) "
             "ORDER BY id DESC LIMIT ?",
-            (before, before, limit),
+            (0 if archive else self.epoch, before, before, limit),
         ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
@@ -83,15 +100,18 @@ class MemoryStore:
         if kind not in {"user", "assistant", "observation"}:
             raise ValueError("Unknown source kind")
         with self.db:
+            if kind == "user" or (kind == "assistant" and self.current_turn is None):
+                turn = self.db.execute("INSERT INTO conversation_turns(scene,epoch) VALUES(?,?)", (scene, self.epoch))
+                self.current_turn = turn.lastrowid
             cur = self.db.execute(
-                "INSERT INTO sources(kind,text,scene,created,speech) VALUES(?,?,?,?,?)",
-                (kind, text, scene, datetime.now(timezone.utc).isoformat(), speech),
+                "INSERT INTO sources(kind,text,scene,created,speech,epoch,conversation_turn) VALUES(?,?,?,?,?,?,?)",
+                (kind, text, scene, datetime.now(timezone.utc).isoformat(), speech, self.epoch, self.current_turn if kind != "observation" else None),
             )
         return cur.lastrowid
 
     def sources(self, scene: str | None = None, limit: int = 40) -> list[dict]:
-        query = "SELECT * FROM sources WHERE redacted=0"
-        args = []
+        query = "SELECT * FROM sources WHERE redacted=0 AND epoch=?"
+        args = [self.epoch]
         if scene is not None:
             query += " AND scene=?"
             args.append(scene)
@@ -104,15 +124,15 @@ class MemoryStore:
         rows = self.sources(scene, limit)
         if rows and rows[0]["kind"] == "assistant":
             boundary = self.db.execute(
-                "SELECT id FROM sources WHERE redacted=0 AND scene=? AND kind!='assistant' AND id<? ORDER BY id DESC LIMIT 1",
-                (scene, rows[0]["id"]),
+                "SELECT id FROM sources WHERE redacted=0 AND epoch=? AND scene=? AND kind!='assistant' AND id<? ORDER BY id DESC LIMIT 1",
+                (self.epoch, scene, rows[0]["id"]),
             ).fetchone()
             if boundary:
                 rows = [
                     dict(r)
                     for r in self.db.execute(
-                        "SELECT * FROM sources WHERE redacted=0 AND scene=? AND id>=? ORDER BY id",
-                        (scene, boundary["id"]),
+                        "SELECT * FROM sources WHERE redacted=0 AND epoch=? AND scene=? AND id>=? ORDER BY id",
+                        (self.epoch, scene, boundary["id"]),
                     )
                 ]
         return rows
@@ -131,7 +151,7 @@ class MemoryStore:
             f"SELECT * FROM sources WHERE redacted=0 AND id IN ({','.join('?' for _ in ids)})",
             ids,
         ).fetchall()
-        return [dict(r) for r in rows] if len(rows) == len(set(ids)) else []
+        return [dict(r) for r in rows] if len(rows) == len(set(ids)) and (not hasattr(self, "epoch") or all(r["epoch"] == self.epoch for r in rows)) else []
 
     def remember(
         self, kind: str, text: str, source_ids: list[int], evidence: str
@@ -157,25 +177,25 @@ class MemoryStore:
             return None
         scene = rows[0]["scene"] if origin == "observation" else None
         duplicate = self.db.execute(
-            "SELECT id FROM memories WHERE text=? AND scene IS ?", (text, scene)
+            "SELECT id FROM memories WHERE text=? AND scene IS ? AND epoch=?", (text, scene, self.epoch)
         ).fetchone()
         if duplicate:
             return duplicate["id"]
         with self.db:
             cur = self.db.execute(
-                "INSERT INTO memories(kind,text,source_ids,evidence,origin,scene) VALUES(?,?,?,?,?,?)",
-                (kind, text, json.dumps(source_ids), evidence, origin, scene),
+                "INSERT INTO memories(kind,text,source_ids,evidence,origin,scene,epoch) VALUES(?,?,?,?,?,?,?)",
+                (kind, text, json.dumps(source_ids), evidence, origin, scene, self.epoch),
             )
         return cur.lastrowid
 
-    def memories(self) -> list[dict]:
-        return [
-            dict(r) for r in self.db.execute("SELECT * FROM memories ORDER BY id DESC")
-        ]
+    def memories(self, *, archive=False) -> list[dict]:
+        if not hasattr(self, "epoch"):
+            return [dict(r) for r in self.db.execute("SELECT * FROM memories ORDER BY id DESC")]
+        return [dict(r) for r in self.db.execute("SELECT * FROM memories WHERE epoch=? ORDER BY id DESC", (0 if archive else self.epoch,))]
 
     def _redact_dependencies(self, item_id: int):
         row = self.db.execute(
-            "SELECT source_ids FROM memories WHERE id=?", (item_id,)
+            "SELECT source_ids FROM memories WHERE id=? AND epoch=?", (item_id, self.epoch)
         ).fetchone()
         if not row:
             raise KeyError(item_id)
@@ -183,7 +203,7 @@ class MemoryStore:
         ids.update(
             r["id"]
             for r in self.db.execute(
-                "SELECT id FROM sources WHERE kind='assistant' AND redacted=0"
+                "SELECT id FROM sources WHERE kind='assistant' AND redacted=0 AND epoch=?", (self.epoch,)
             )
         )
         for source in ids:
@@ -192,18 +212,18 @@ class MemoryStore:
                 (source,),
             )
         for summary in self.db.execute(
-            "SELECT scene,source_ids FROM summaries"
+            "SELECT scene,source_ids FROM summaries WHERE epoch=?", (self.epoch,)
         ).fetchall():
             if ids.intersection(json.loads(summary["source_ids"])):
                 self.db.execute(
-                    "DELETE FROM summaries WHERE scene=?", (summary["scene"],)
+                    "DELETE FROM summaries WHERE scene=? AND epoch=?", (summary["scene"], self.epoch)
                 )
-        for memory in self.db.execute("SELECT id,source_ids FROM memories").fetchall():
+        for memory in self.db.execute("SELECT id,source_ids FROM memories WHERE epoch=?", (self.epoch,)).fetchall():
             if ids.intersection(json.loads(memory["source_ids"])):
                 self.db.execute("DELETE FROM memories WHERE id=?", (memory["id"],))
         # Assistant paraphrases can otherwise repeat the forgotten fact next turn.
         self.db.execute(
-            "UPDATE sources SET redacted=1,text='',speech=NULL WHERE kind='assistant'"
+            "UPDATE sources SET redacted=1,text='',speech=NULL WHERE kind='assistant' AND epoch=?", (self.epoch,)
         )
 
     def forget(self, item_id: int):
@@ -216,13 +236,13 @@ class MemoryStore:
             raise ValueError("记忆需为 1–600 字")
         with self.db:
             row = self.db.execute(
-                "SELECT kind,scene FROM memories WHERE id=?", (item_id,)
+                "SELECT kind,scene FROM memories WHERE id=? AND epoch=?", (item_id, self.epoch)
             ).fetchone()
             if not row:
                 raise KeyError(item_id)
             self._redact_dependencies(item_id)
             self.db.execute(
-                "INSERT OR REPLACE INTO memories(id,kind,text,source_ids,evidence,origin,scene) VALUES(?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO memories(id,kind,text,source_ids,evidence,origin,scene,epoch) VALUES(?,?,?,?,?,?,?,?)",
                 (
                     item_id,
                     row["kind"],
@@ -231,6 +251,7 @@ class MemoryStore:
                     "用户直接修改",
                     "user_edit",
                     row["scene"],
+                    self.epoch,
                 ),
             )
 
@@ -239,14 +260,14 @@ class MemoryStore:
             return None
         with self.db:
             self.db.execute(
-                "INSERT OR REPLACE INTO summaries VALUES(?,?,?)",
-                (scene, text, json.dumps(sorted(set(source_ids)))),
+                "INSERT OR REPLACE INTO summaries(scene,text,source_ids,epoch) VALUES(?,?,?,?)",
+                (scene, text, json.dumps(sorted(set(source_ids))), self.epoch),
             )
         return text
 
     def summary(self, scene: str) -> dict | None:
         row = self.db.execute(
-            "SELECT * FROM summaries WHERE scene=?", (scene,)
+            "SELECT * FROM summaries WHERE scene=? AND epoch=?", (scene, self.epoch)
         ).fetchone()
         if not row:
             return None
@@ -262,18 +283,18 @@ class MemoryStore:
 
     def clear_scene(self, scene: str):
         with self.db:
-            self.db.execute("DELETE FROM memories WHERE scene=?", (scene,))
+            self.db.execute("DELETE FROM memories WHERE scene=? AND epoch=?", (scene, self.epoch))
             ids = {
                 r["id"]
                 for r in self.db.execute(
-                    "SELECT id FROM sources WHERE scene=?", (scene,)
+                    "SELECT id FROM sources WHERE scene=? AND epoch=?", (scene, self.epoch)
                 )
             }
-            for row in self.db.execute("SELECT id,source_ids FROM memories").fetchall():
+            for row in self.db.execute("SELECT id,source_ids FROM memories WHERE epoch=?", (self.epoch,)).fetchall():
                 if ids.intersection(json.loads(row["source_ids"])):
                     self.db.execute("DELETE FROM memories WHERE id=?", (row["id"],))
             self.db.execute(
-                "UPDATE sources SET redacted=1,text='',speech=NULL WHERE scene=?",
-                (scene,),
+                "UPDATE sources SET redacted=1,text='',speech=NULL WHERE scene=? AND epoch=?",
+                (scene, self.epoch),
             )
-            self.db.execute("DELETE FROM summaries WHERE scene=?", (scene,))
+            self.db.execute("DELETE FROM summaries WHERE scene=? AND epoch=?", (scene, self.epoch))

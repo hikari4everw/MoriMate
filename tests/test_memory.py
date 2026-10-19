@@ -75,7 +75,8 @@ def test_legacy_corrected_memory_with_lost_scope_is_quarantined(tmp_path):
             "INSERT INTO memories VALUES(1,'experience','旧游戏纠正记忆','[]','用户直接修改','user_edit')"
         )
     store = MemoryStore(path)
-    assert store.memories()[0]["scene"] == "unknown"
+    assert store.memories() == []
+    assert store.memories(archive=True)[0]["scene"] == "unknown"
 
 
 def test_summary_exposes_recorded_range_from_its_actual_sources(tmp_path):
