@@ -1,6 +1,7 @@
 """Owns only the processes it starts; Ctrl-C shuts them down in reverse order."""
 
 import argparse
+import json
 import os
 import signal
 import socket
@@ -78,8 +79,8 @@ def wait_ready(url, process, timeout=120):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="启动本地 Hiyori；不连接付费 API")
-    parser.add_argument("--model", choices=MODELS, default="27b")
+    parser = argparse.ArgumentParser(description="启动 Hiyori；云 API 由主人在界面配置")
+    parser.add_argument("--model", choices=MODELS, default=None)
     parser.add_argument(
         "--voice",
         choices=["sayo", "mao", "roxy"],
@@ -112,12 +113,19 @@ def main():
             parser.error(
                 "Electron 未通过 macOS 安全验证；请使用 --web。未启动模型或语音服务。"
             )
+    saved = ROOT / ".runtime/model-selection.json"
+    saved_selection = json.loads(saved.read_text()).get("selection", "") if saved.exists() else ""
+    cloud_start = args.model is None and saved_selection.startswith("cloud:")
+    args_model = args.model or "27b"
     try:
-        _, model, backend_name, supports_vision = model_launch(ROOT, args.model)
+        if cloud_start:
+            model, backend_name, supports_vision = "cloud", "mlx", False
+        else:
+            _, model, backend_name, supports_vision = model_launch(ROOT, args_model)
     except RuntimeError as exc:
         parser.error(str(exc))
     voice_key = args.voice or VoiceCatalog(ROOT).default
-    ports = [18080, 12393]
+    ports = [12393] if cloud_start else [18080, 12393]
     for port in ports:
         with socket.socket() as s:
             if s.connect_ex(("127.0.0.1", port)) == 0:
@@ -130,7 +138,9 @@ def main():
     env = os.environ.copy()
     env["HF_HOME"] = str(ROOT / ".cache/huggingface")
     env["COMPANION_MANAGED_MODELS"] = "1"
-    env["COMPANION_MODEL_KEY"] = args.model
+    env["COMPANION_MODEL_KEY"] = args_model
+    if args.model is not None:
+        env["COMPANION_FORCE_MODEL"] = "1"
     env["COMPANION_MODEL"] = model
     env["COMPANION_MODEL_BACKEND"] = backend_name
     env["COMPANION_MODEL_VISION"] = "1" if supports_vision else "0"
@@ -158,7 +168,7 @@ def main():
         backend = launch([".venv/bin/python", "backend/run_companion.py"], "backend")
         wait_ready("http://127.0.0.1:12393/health", backend, 210)
         print(
-            f"本地桌宠已启动：{MODELS[args.model]} / 语音首选 {voice_key}\nhttp://127.0.0.1:12393\n语音加载状态见界面；日志 .runtime/managed-voice.log\n按 Ctrl-C 关闭本次启动的服务。",
+            f"桌宠已启动：{saved_selection if cloud_start else MODELS[args_model]} / 语音首选 {voice_key}\nhttp://127.0.0.1:12393\n语音加载状态见界面；日志 .runtime/managed-voice.log\n按 Ctrl-C 关闭本次启动的服务。",
             flush=True,
         )
         if not args.web:

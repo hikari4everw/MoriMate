@@ -16,6 +16,7 @@ from .guest_server import LanSharing
 from .memory import MemoryStore
 from .model import LocalModel
 from .model_service import ModelService
+from .model_router import ModelRouter
 from .observation import StableText, CommentGate
 from .runtime import CompanionRuntime
 from .scheduling import GenerationScheduler
@@ -39,9 +40,7 @@ GUEST_COMMANDS = {
     "persona-get",
     "persona-set",
     "persona-reset",
-    "model-switch",
     "voice-switch",
-    "thinking-mode",
 }
 
 
@@ -82,6 +81,7 @@ def create_app(
     model_service=None,
     voice_service=None,
     database_path=None,
+    connection_store=None,
 ):
     config = json.loads((root / "config/companion.json").read_text())
     config["model"] = os.environ.get("COMPANION_MODEL", config["model"])
@@ -129,8 +129,11 @@ def create_app(
     ):
         voices = VoiceService(root)
 
+    router = None
+
     @asynccontextmanager
     async def lifespan(app):
+        nonlocal router
         app.state.connected = False
         app.state.sharing = LanSharing(root, websocket, revoke)
         mount_assets(app.state.sharing.app)
@@ -139,8 +142,11 @@ def create_app(
         if voices:
             voices.on_change = broadcast_voice_change
         try:
-            if manager:
-                await manager.start(os.environ.get("COMPANION_MODEL_KEY", "27b"))
+            router = ModelRouter(root, manager, fallback=model, fallback_state=model_state(), connections=connection_store)
+            router.on_change = broadcast_model_change
+            app.state.model_router = router
+            if manager or router.selection_path.exists():
+                await router.start(os.environ.get("COMPANION_MODEL_KEY", "27b"), force=os.environ.get("COMPANION_FORCE_MODEL") == "1")
             app.state.store = MemoryStore(
                 database_path or root / ".runtime/companion.sqlite3"
             )
@@ -153,8 +159,8 @@ def create_app(
             await app.state.sharing.close()
             if voices:
                 await voices.close()
-            if manager:
-                await manager.close()
+            if router:
+                await router.close()
             if hasattr(app.state, "store"):
                 app.state.store.close()
 
@@ -220,6 +226,8 @@ def create_app(
     capture = capture or WindowCapture(root / ".runtime/window-observer")
 
     def model_state():
+        if router:
+            return router.snapshot()
         if manager:
             return manager.snapshot()
         return {
@@ -255,7 +263,7 @@ def create_app(
     def model_ready():
         return (
             not changing_thinking
-            and (manager is None or manager.ready)
+            and (router.ready if router else manager is None or manager.ready)
             and (voices is None or voices.phase not in BUSY_PHASES)
         )
 
@@ -306,7 +314,7 @@ def create_app(
             app.state.store
             if owner
             else MemoryStore(app.state.sharing.registry.database(identity)),
-            manager.transport if manager and manager.transport else model,
+            router.bind(identity),
             voice,
             send,
             (root / "config/persona.md").read_text(),
@@ -314,7 +322,7 @@ def create_app(
         runtime.persona = runtime.store.persona(runtime.persona)
         runtime.scheduler = scheduler
         runtime.priority = 0 if owner else 1
-        runtime.can_generate = model_ready
+        runtime.can_generate = lambda: model_ready() and router.allowed(identity)
         gate, stable = CommentGate(), StableText()
         selected = None
         dialogue_region = None
@@ -329,6 +337,7 @@ def create_app(
         async def status():
             services = {**model_state(), **voice_state()}
             if not owner:
+                services["available_models"] = []
                 # Model process paths and diagnostic details belong to the host.
                 services.pop("model", None)
                 for key in (
@@ -344,7 +353,7 @@ def create_app(
                     "type": "status",
                     "role": "owner" if owner else "guest",
                     "guest_label": guest["label"] if guest else None,
-                    "capabilities": {"observe": owner, "admin": owner},
+                    "capabilities": {"observe": owner, "admin": owner, "model_admin": owner},
                     "changed_by": changed_by,
                     "muted": runtime.muted,
                     "proactive": gate.enabled,
@@ -363,12 +372,11 @@ def create_app(
             nonlocal latest, playing
             latest = None
             playing = False
-            if manager.phase == "stopping":
+            if router.phase == "stopping":
                 with contextlib.suppress(Exception):
                     await stop_connection()
             runtime.metrics.clear()
-            if manager.ready:
-                runtime.model = manager.transport
+            runtime.model = router.bind(identity)
             # Browser disconnection must not fail or cancel a service-level switch.
             with contextlib.suppress(Exception):
                 await status()
@@ -439,7 +447,7 @@ def create_app(
             while True:
                 await asyncio.sleep(10)
                 if (
-                    model_ready()
+                    runtime.can_generate()
                     and not runtime.busy
                     and not playing
                     and time.monotonic() - last_activity > 15
@@ -555,6 +563,8 @@ def create_app(
                         ):
                             raise ValueError("没有权限执行此操作")
                         app.state.sharing.registry.touch(identity)
+                    if kind in {"text-input", "look"} and not router.allowed(identity):
+                        raise RuntimeError("主人尚未授权访客使用当前云模型")
                     if kind in {"text-input", "look"} and not model_ready():
                         raise RuntimeError(
                             "模型或语音正在切换，或模型不可用，请等待就绪后发送"
@@ -573,7 +583,37 @@ def create_app(
                         "scene-clear",
                     } or (kind == "settings" and data.get("muted")):
                         await cancel_capture()
-                    if kind in {"model-switch", "thinking-mode"}:
+                    if kind in {"cloud-list", "cloud-save", "cloud-delete", "cloud-test", "cloud-usage"}:
+                        if not owner:
+                            raise ValueError("没有权限执行此操作")
+                        if router.task and not router.task.done():
+                            raise RuntimeError("模型正在切换，请稍候")
+                        if kind == "cloud-list":
+                            await send({"type": "cloud-connections", "items": router.connections.views()})
+                        elif kind == "cloud-usage":
+                            await send({"type": "cloud-usage", "items": router.usage.rows()})
+                        elif kind == "cloud-save":
+                            await stop_all()
+                            await asyncio.to_thread(router.connections.save, data.get("connection", {}), data.get("api_key"))
+                            await send({"type": "cloud-connections", "items": router.connections.views()})
+                            await broadcast_model_change()
+                        elif kind == "cloud-delete":
+                            key = data.get("connection_id")
+                            if key == router.cloud_id:
+                                raise ValueError("先切换到其他模型，再删除当前连接")
+                            await asyncio.to_thread(router.connections.delete, key)
+                            await send({"type": "cloud-connections", "items": router.connections.views()})
+                        else:
+                            await router.test_connection(data.get("connection_id"))
+                            await send({"type": "cloud-test-result", "message": "基本调用成功；人格、视觉及语音仍需实际体验"})
+                    elif kind in {"model-switch", "thinking-mode"}:
+                        if not owner:
+                            raise ValueError("没有权限执行此操作")
+                        if router.task and not router.task.done():
+                            raise RuntimeError("模型正在切换，请稍候")
+                        if kind == "model-switch" and str(data.get("model_key", "")).startswith("cloud:"):
+                            router.request_switch(data["model_key"])
+                            continue
                         if changing_thinking or (
                             manager and manager.task and not manager.task.done()
                         ):
@@ -595,6 +635,7 @@ def create_app(
                             raise ValueError("模型选择无效")
                         if kind == "thinking-mode" and (
                             manager.active_key != "qwen38-rp"
+                            or router.cloud_id
                             or data.get("thinking_mode")
                             not in {"off", "limited", "full"}
                         ):
@@ -604,7 +645,7 @@ def create_app(
                         runtime.metrics.clear()
                         last_activity = time.monotonic()
                         if kind == "model-switch":
-                            manager.request_switch(data["model_key"])
+                            router.request_switch(data["model_key"])
                         else:
                             changing_thinking = True
                             try:

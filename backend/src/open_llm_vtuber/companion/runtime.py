@@ -317,7 +317,8 @@ class CompanionRuntime:
 
             try:
                 async for chunk in self.model.stream(
-                    messages, max_tokens=max_tokens, reasoning_budget=reasoning_budget
+                    messages, max_tokens=max_tokens, reasoning_budget=reasoning_budget,
+                    **({"purpose": "proactive" if self.is_proactive else "chat"} if hasattr(self.model, "router") else {}),
                 ):
                     for sentence in parser.feed(chunk):
                         await deliver(sentence)

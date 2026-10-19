@@ -219,7 +219,7 @@ def test_guest_connections_are_rejected_during_revocation(lan):
         owner_client.portal.call(sharing.lock.release)
 
 
-def test_guest_can_switch_shared_model_thinking_and_voice(tmp_path, monkeypatch):
+def test_only_owner_switches_model_and_thinking_guest_can_switch_voice(tmp_path, monkeypatch):
     from open_llm_vtuber.companion import guest_server
     from open_llm_vtuber.companion.app import create_app
     from test_app import Capture
@@ -269,13 +269,16 @@ def test_guest_can_switch_shared_model_thinking_and_voice(tmp_path, monkeypatch)
         with connect(guest) as ws:
             until(ws, "memories")
             ws.send_json({"type": "model-switch", "model_key": "qwen38-rp"})
-            assert ready(ws, "active_model_key", "qwen38-rp")["changed_by"] == "访客001"
-            assert (
-                ready(owner, "active_model_key", "qwen38-rp")["active_model_key"]
-                == "qwen38-rp"
-            )
+            reply = ws.receive_json()
+            assert reply["type"] == "error" and "权限" in reply["message"]
             ws.send_json({"type": "thinking-mode", "thinking_mode": "full"})
-            assert ready(owner, "thinking_mode", "full")["changed_by"] == "访客001"
+            reply = ws.receive_json()
+            assert reply["type"] == "error" and "权限" in reply["message"]
+            owner.send_json({"type": "model-switch", "model_key": "qwen38-rp"})
+            ready(owner, "active_model_key", "qwen38-rp")
+            ready(ws, "active_model_key", "qwen38-rp")
+            owner.send_json({"type": "thinking-mode", "thinking_mode": "full"})
+            ready(owner, "thinking_mode", "full")
             ready(ws, "thinking_mode", "full")
             ws.send_json({"type": "voice-switch", "voice_key": "mao"})
             assert ready(ws, "active_voice_key", "mao")["voice_label"]
