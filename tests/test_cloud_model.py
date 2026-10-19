@@ -78,3 +78,11 @@ async def test_cancel_closes_http_stream():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert body.closed
+
+
+async def test_image_upload_requires_both_capability_and_permission():
+    records = []
+    model = client(records=records)
+    with pytest.raises(ValueError, match='图片'):
+        await model.complete([{'role': 'user', 'content': [{'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,AA'}}]}])
+    assert records == []

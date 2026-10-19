@@ -20,6 +20,14 @@ class CloudModel:
         self.last_reasoning_characters = 0
 
     async def stream_events(self, request):
+        has_images = any(
+            isinstance(message.get("content"), list) and any(
+                isinstance(part, dict) and part.get("type") == "image_url"
+                for part in message["content"]
+            ) for message in request.messages
+        )
+        if has_images and not (self.spec.supports_vision and self.spec.allow_images):
+            raise ValueError("当前连接未同时启用图片能力和截图上传授权")
         body = {"model": self.model, "messages": request.messages, "stream": True,
                 "stream_options": {"include_usage": True}}
         limit = min(request.max_tokens, self.spec.max_output_tokens)

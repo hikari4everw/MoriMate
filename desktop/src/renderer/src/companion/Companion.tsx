@@ -9,6 +9,8 @@ import { TurnPlayer } from './turn-player';
 import { AccessGate, type Session } from './access-gate';
 import { PersonaPanel, SharingPanel, type PanelInbox } from './sharing-panels';
 import './companion.css';
+import { ModelSettings } from './model-settings';
+import { modelAccess } from './protocol';
 
 const BASE = window.location.protocol === 'http:' && window.location.port !== '5173'
   ? window.location.origin : 'http://127.0.0.1:12393';
@@ -20,7 +22,7 @@ type Memory = { id: number; kind: string; text: string; evidence: string; origin
 type WindowItem = { id: number; app: string; title: string };
 type AudioPacket = { turn_id: number; sentence_id: number; audio: string | null; display_text: { text: string }; tts_text: string; expires_at_ms?: number; actions?: { expressions?: string[] } };
 type VoiceProfile = { key: string; label: string; engine: string; engine_label: string };
-type Status = { observing: boolean; muted: boolean; proactive: boolean; intensity: string; scene: string;
+type Status = { cloud?: boolean; cloud_provider?: string; cloud_model?: string; cloud_guests_allowed?: boolean; observing: boolean; muted: boolean; proactive: boolean; intensity: string; scene: string;
   role?: 'owner' | 'guest'; guest_label?: string; capabilities?: { observe: boolean; admin: boolean }; changed_by?: string;
   voice_label?: string; model?: string; managed_models?: boolean; active_model_key?: string | null;
   target_model_key?: string | null; thinking_mode?: string; available_models?: { key: string; label: string }[];
@@ -143,7 +145,7 @@ function Companion({ session, onSessionExpired }: { session: Session; onSessionE
       ws.onmessage = event => {
         if (socket.current !== ws) return;
         const data = JSON.parse(event.data);
-        if (['persona', 'sharing-status', 'guests-list', 'guest-history', 'guest-memories', 'error'].includes(data.type)) setPanelMessages(previous => ({ ...previous, [data.type]: data }));
+        if (['persona', 'sharing-status', 'guests-list', 'guest-history', 'guest-memories', 'cloud-connections', 'cloud-usage', 'cloud-test-result', 'error'].includes(data.type)) setPanelMessages(previous => ({ ...previous, [data.type]: data }));
         if (data.type === 'status') { setStatus(data); setConfigPending(false); setVoicePending(false); muted.current = data.muted; }
         if (data.type === 'history') setHistory(data.items.filter((i: History) => i.kind !== 'observation'));
         if (data.type === 'memories') setMemories(data.items);
@@ -197,9 +199,10 @@ function Companion({ session, onSessionExpired }: { session: Session; onSessionE
   const modelSwitching = configPending || ['starting', 'stopping', 'loading', 'recovering'].includes(status.model_phase || '');
   const voiceSwitching = voicePending || ['starting', 'stopping', 'loading', 'recovering'].includes(status.voice_phase || '');
   const switching = modelSwitching || voiceSwitching;
-  const modelUnavailable = switching || status.model_phase === 'error';
+  const access = modelAccess(isOwner, connected, status);
+  const modelUnavailable = switching || !access.canSend;
   const changeModelConfig = (data: object) => {
-    if (!connected || switching || !status.managed_models) return;
+    if (!isOwner || !connected || switching || !status.managed_models) return;
     player.current?.stop(); setBusy(false); setWaiting(''); setError(''); setConfigPending(true);
     send(data);
   };
@@ -258,12 +261,12 @@ function Companion({ session, onSessionExpired }: { session: Session; onSessionE
     <section className="panel">
       <details className="shared-config"><summary>模型与声音设置 · 修改影响所有在线用户</summary>
       <div className="model-controls" aria-label="模型设置">
-        <label>模型<select aria-label="选择模型" value={(modelSwitching ? status.target_model_key : status.active_model_key) || ''} disabled={!connected || switching || !status.managed_models} onChange={e => changeModelConfig({ type: 'model-switch', model_key: e.target.value })}>
+        <label>模型<select aria-label="选择模型" value={(modelSwitching ? status.target_model_key : status.active_model_key) || ''} disabled={!isOwner || !connected || switching || !status.managed_models} onChange={e => changeModelConfig({ type: 'model-switch', model_key: e.target.value })}>
           {!status.managed_models && <option value="">外部服务 · {status.model || '当前模型'}</option>}
           {status.managed_models && !status.active_model_key && !switching && <option value="">请选择模型</option>}
           {status.available_models?.map(item => <option key={item.key} value={item.key}>{item.label}</option>)}
         </select></label>
-        <label>思考<select aria-label="选择思考档位" value={status.thinking_mode || 'off'} disabled={!connected || switching || !status.managed_models || status.active_model_key !== 'qwen38-rp'} onChange={e => changeModelConfig({ type: 'thinking-mode', thinking_mode: e.target.value })}>
+        <label>思考<select aria-label="选择思考档位" value={status.thinking_mode || 'off'} disabled={!isOwner || !connected || switching || !status.managed_models || status.active_model_key !== 'qwen38-rp'} onChange={e => changeModelConfig({ type: 'thinking-mode', thinking_mode: e.target.value })}>
           <option value="off">关闭</option><option value="limited">有限预算</option><option value="full">完整思考（可能长时间等待）</option>
         </select></label>
         <small role="status">{modelSwitching ? `${phaseLabel[status.model_phase || ''] || '正在更新配置'} · ${modelLabel(status.target_model_key)}` : status.managed_models ? `当前就绪：${modelLabel(status.active_model_key)}` : '外部模型服务；请用托管启动器启用切换'}</small>
@@ -283,7 +286,9 @@ function Companion({ session, onSessionExpired }: { session: Session; onSessionE
       </div>
       {status.changed_by && <small role="status">最近由{status.changed_by}调整共享配置</small>}
       </details>
-      <nav>{[['chat', '聊天'], ...(canObserve ? [['observe', '观察']] : []), ['memory', '记忆'], ['persona', '人格'], ...(isOwner ? [['sharing', '共享']] : [])].map(([key, label]) => <button key={key} className={tab === key ? 'selected' : ''} onClick={() => setTab(key)}>{label}</button>)}</nav>
+      <nav>{[['chat', '聊天'], ...(canObserve ? [['observe', '观察']] : []), ['memory', '记忆'], ['persona', '人格'], ...(isOwner ? [['sharing', '共享'], ['models', '云模型']] : [])].map(([key, label]) => <button key={key} className={tab === key ? 'selected' : ''} onClick={() => setTab(key)}>{label}</button>)}</nav>
+      {tab === 'models' && isOwner && <ModelSettings send={send} messages={panelMessages} connected={connected} switching={switching} />}
+      {status.cloud && <small role="status">云端：{status.cloud_provider} / {status.cloud_model} · {isOwner ? '文字上下文与后台整理会外发，截图另行授权' : status.cloud_guests_allowed ? '主人已授权，此聊天及相关记忆会发送至该云服务' : '主人尚未授权访客使用'}</small>}
       {tab === 'persona' && <PersonaPanel send={send} messages={panelMessages} connected={connected} />}
       {tab === 'sharing' && isOwner && <SharingPanel send={send} messages={panelMessages} connected={connected} />}
       {tab === 'chat' && <div className="history">{history.map((item, i) => <article key={`${item.id}-${i}`} className={item.kind}><small>{item.kind === 'user' ? '你' : 'Hiyori'}</small><p>{item.text}</p></article>)}<div ref={endRef} /></div>}
