@@ -40,8 +40,8 @@ class GuestRegistry:
         )
 
     def set_password(self, password):
-        if not isinstance(password, str) or not 8 <= len(password) <= 128:
-            raise ValueError("访问密码需为 8–128 字符")
+        if not isinstance(password, str) or not 4 <= len(password) <= 128:
+            raise ValueError("访问密码需为 4–128 字符")
         salt = secrets.token_hex(16)
         hashed = hashlib.scrypt(
             password.encode(), salt=bytes.fromhex(salt), n=16384, r=8, p=1

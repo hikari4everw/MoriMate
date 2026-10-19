@@ -39,6 +39,22 @@ def until(ws, kind):
     raise AssertionError(kind)
 
 
+def test_sharing_four_character_password_acknowledges_and_survives_reconnect(tmp_path):
+    with make_client(tmp_path) as client:
+        with client.websocket_connect("/client-ws") as ws:
+            until(ws, "sharing-status")
+            ws.send_json({"type": "sharing-password-set", "password": "abcd"})
+            assert until(ws, "sharing-status")["password_set"] is True
+            result = ws.receive_json()
+            assert result["type"] == "sharing-result"
+            assert result["operation"] == "sharing-password-set"
+            ws.send_json({"type": "sharing-password-set", "password": "abc"})
+            assert "4–128" in until(ws, "error")["message"]
+        with client.websocket_connect("/client-ws") as ws:
+            state = until(ws, "sharing-status")
+            assert state["password_set"] and not state["enabled"]
+
+
 def test_voice_switch_survives_reconnect_and_preserves_text_mode(tmp_path):
     import time
     from test_voice_service import service
@@ -54,6 +70,9 @@ def test_voice_switch_survives_reconnect_and_preserves_text_mode(tmp_path):
             while state["voice_phase"] != "ready":
                 state = until(ws, "status")
             assert state["active_voice_key"] == "roxy"
+            assert state["voice_tone_mode"] == "fixed"
+            ws.send_json({"type": "voice-tone-policy", "mode": "fixed", "tone": "relieved"})
+            assert until(ws, "status")["fixed_voice_tone"] == "relieved"
             ws.send_json({"type": "settings", "muted": True})
             until(ws, "status")
             ws.send_json({"type": "text-input", "text": "保留记录"})
@@ -69,6 +88,7 @@ def test_voice_switch_survives_reconnect_and_preserves_text_mode(tmp_path):
         with client.websocket_connect("/client-ws") as ws:
             state = until(ws, "status")
             assert state["active_voice_key"] == "mao"
+            assert state["fixed_voice_tone"] == "relieved"
             rows = until(ws, "history")["items"]
             assert rows[0]["text"] == "保留记录"
             assert "不该写入" not in str(rows)

@@ -22,8 +22,24 @@ def test_rejects_thinking_and_missing_japanese_instead_of_speaking_json():
 
 def test_final_line_without_newline_and_unknown_emotion():
     parser = BilingualParser()
-    assert parser.feed('{"zh":"你好。","ja":"こんにちは。","emotion":"unknown"}') == []
-    assert parser.finish()[0].emotion == "neutral"
+    assert parser.feed('{"zh":"你好。","ja":"こんにちは。","emotion":"unknown"}')[0].emotion == "neutral"
+    assert parser.finish() == []
+
+
+def test_complete_object_does_not_wait_for_newline_or_next_token():
+    parser = BilingualParser()
+    assert parser.feed('{"zh":"括号 } 与引号 \\"","ja":"はい。"') == []
+    assert parser.feed('}')[0].ja == "はい。"
+    assert parser.feed('\n  {"zh":"第二句","ja":"二。"}')[0].zh == "第二句"
+    assert parser.finish() == []
+
+
+@pytest.mark.parametrize("suffix", [" trailing\n", ",\n", " ]\n"])
+def test_trailing_non_protocol_data_is_rejected(suffix):
+    parser = BilingualParser()
+    parser.feed('{"zh":"你好","ja":"はい"}')
+    with pytest.raises(ValueError):
+        parser.feed(suffix)
 
 
 def test_bounds_unterminated_generation():

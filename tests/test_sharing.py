@@ -5,6 +5,21 @@ import pytest
 from open_llm_vtuber.companion.memory import MemoryStore
 
 
+@pytest.mark.parametrize("password, accepted", [("abc", False), ("四个汉字", True), ("abcd", True), ("x" * 128, True), ("x" * 129, False)])
+def test_local_test_password_bounds(tmp_path, password, accepted):
+    from open_llm_vtuber.companion.sharing import GuestRegistry
+    registry = GuestRegistry(tmp_path)
+    try:
+        if accepted:
+            registry.set_password(password)
+            assert registry.check_password(password)
+        else:
+            with pytest.raises(ValueError, match="4–128"):
+                registry.set_password(password)
+    finally:
+        registry.close()
+
+
 def test_guest_credentials_restore_only_their_own_store(tmp_path):
     from open_llm_vtuber.companion.sharing import GuestRegistry
 

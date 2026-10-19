@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import json
 import os
 import signal
 import socket
@@ -8,7 +9,7 @@ from pathlib import Path
 
 import httpx
 
-from .voices import VoiceCatalog, VoiceSynthesizer
+from .voices import VOICE_TONES, VoiceCatalog, VoiceSynthesizer
 
 BUSY_PHASES = {"starting", "stopping", "loading", "recovering"}
 
@@ -36,6 +37,27 @@ class VoiceService:
         self.on_change = None
         self.lock = asyncio.Lock()
         self.closed = False
+        self.policy_path = self.root / ".runtime/voice-policy.json"
+        policy = json.loads(self.policy_path.read_text()) if self.policy_path.exists() else {}
+        self.tone_mode = policy.get("mode", "fixed")
+        self.fixed_tone = policy.get("tone", "neutral")
+        self.tone_confirmed = policy.get("confirmed", False)
+        self.validate_tone_policy(self.tone_mode, self.fixed_tone)
+
+    @staticmethod
+    def validate_tone_policy(mode, tone):
+        if not isinstance(mode, str) or mode not in {"fixed", "auto"} or not isinstance(tone, str) or tone not in VOICE_TONES:
+            raise ValueError("语气模式或固定语气无效")
+
+    async def set_tone_policy(self, mode, tone):
+        self.validate_tone_policy(mode, tone)
+        confirmed = self.tone_confirmed or mode == "fixed"
+        self.policy_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.policy_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"mode": mode, "tone": tone, "confirmed": confirmed}))
+        temporary.replace(self.policy_path)
+        self.tone_mode, self.fixed_tone, self.tone_confirmed = mode, tone, confirmed
+        await self.notify()
 
     @property
     def ready(self):
@@ -48,6 +70,9 @@ class VoiceService:
     def snapshot(self):
         return {
             "managed_voices": True,
+            "voice_tone_mode": self.tone_mode,
+            "fixed_voice_tone": self.fixed_tone,
+            "voice_tone_confirmed": self.tone_confirmed,
             "available_voices": self.catalog.available(self.active_key),
             "active_voice_key": self.active_key,
             "target_voice_key": self.target_key,
@@ -235,7 +260,7 @@ class VoiceService:
         async with self.lock:
             if not self.ready:
                 raise RuntimeError("语音服务未就绪，请重试或切换引擎；文字对话仍可使用")
-            return await self.synthesizer.synthesize(text, tone)
+            return await self.synthesizer.synthesize(text, self.fixed_tone if self.tone_mode == "fixed" else tone)
 
     async def async_generate_audio(self, text):
         return await self.synthesize(text)

@@ -84,6 +84,7 @@ class CompanionRuntime:
         self.busy = False
         self.started = 0
         self.metrics = []
+        self.timing = {}
         self.command_lock = asyncio.Lock()
         self.can_generate = lambda: True
         self.is_proactive = False
@@ -138,6 +139,7 @@ class CompanionRuntime:
             self.is_proactive = proactive
             self.started = time.monotonic()
             turn = self.turn_id
+            self.timing = {"turn_id": turn}
             if not proactive:
                 self.store.add_source("user", text, self.scene)
             messages = self.messages(text if proactive else None, image, query=text)
@@ -164,6 +166,7 @@ class CompanionRuntime:
     async def _run(
         self, turn, messages, expires_at=None, *, max_tokens=8192, reasoning_budget=128
     ):
+        self.mark_timing(turn, "queue_entered_seconds")
         if self.scheduler is None:
             return await self._run_reply(
                 turn,
@@ -210,6 +213,8 @@ class CompanionRuntime:
     ):
         # Text pairs are bounded by max_tokens; slow TTS must not delay text delivery.
         queue = asyncio.Queue()
+        self.mark_timing(turn, "generation_started_seconds")
+        self.timing["queue_seconds"] = round(self.timing["generation_started_seconds"] - self.timing.get("queue_entered_seconds", 0), 3)
         expiry = (
             {"expires_at_ms": (time.time() + expires_at - time.monotonic()) * 1000}
             if expires_at is not None
@@ -232,6 +237,9 @@ class CompanionRuntime:
                 if not current():
                     return
                 sentence_id += 1
+                if sentence_id == 1:
+                    self.mark_timing(turn, "first_sentence_seconds")
+                    self.timing["model_wait_seconds"] = round(self.timing["first_sentence_seconds"] - self.timing["generation_started_seconds"], 3)
                 source_id = self.store.add_source(
                     "assistant", sentence.zh, self.scene, speech=sentence.ja,
                     dependencies=context_bundle.source_ids, memory_ids=context_bundle.memory_ids,
@@ -250,12 +258,15 @@ class CompanionRuntime:
                     }
                 )
                 queue.put_nowait((sentence_id, sentence))
+                if sentence_id == 1:
+                    await self.send({"type": "turn-timing", **self.timing})
 
             try:
                 async for chunk in self.model.stream(
                     messages, max_tokens=max_tokens, reasoning_budget=reasoning_budget,
                     **({"purpose": "proactive" if self.is_proactive else "chat"} if hasattr(self.model, "router") else {}),
                 ):
+                    self.mark_timing(turn, "first_token_seconds")
                     for sentence in parser.feed(chunk):
                         await deliver(sentence)
                 for sentence in parser.finish():
@@ -278,17 +289,20 @@ class CompanionRuntime:
                         }
                     )
             finally:
+                self.mark_timing(turn, "generation_finished_seconds")
                 queue.put_nowait(None)
 
         async def consume():
             while (item := await queue.get()) is not None:
                 sentence_id, sentence = item
                 path = None
+                synthesis_started = synthesis_finished = None
                 if not current():
                     continue
                 try:
                     if not self.muted and self.silenced_turn != turn:
                         try:
+                            synthesis_started = time.monotonic() - self.started
                             synthesis = (
                                 self.voice.synthesize(sentence.ja, sentence.voice_tone)
                                 if hasattr(self.voice, "synthesize")
@@ -304,7 +318,10 @@ class CompanionRuntime:
                                     raise
                             finally:
                                 self.voice_task = None
+                            synthesis_finished = time.monotonic() - self.started
                         except Exception as exc:
+                            if current():
+                                self.timing["synthesis_failures"] = self.timing.get("synthesis_failures", 0) + 1
                             await self.send(
                                 {
                                     "type": "error",
@@ -326,6 +343,16 @@ class CompanionRuntime:
                         turn_id=turn, sentence_id=sentence_id, tts_text=sentence.ja
                     )
                     payload.update(expiry)
+                    if "audio_sent_seconds" not in self.timing:
+                        if payload.get("audio"):
+                            self.timing.update(audio_sentence_id=sentence_id, audio_status="ready",
+                                synthesis_started_seconds=round(synthesis_started, 3),
+                                synthesis_finished_seconds=round(synthesis_finished, 3),
+                                synthesis_seconds=round(synthesis_finished - synthesis_started, 3))
+                            self.mark_timing(turn, "audio_sent_seconds")
+                        else:
+                            self.timing["audio_status"] = "muted" if self.muted else "stopped" if self.silenced_turn == turn else "failed"
+                        await self.send({"type": "turn-timing", **self.timing})
                     await self.send(payload)
                 finally:
                     if path:
@@ -356,10 +383,15 @@ class CompanionRuntime:
                     }
                 )
 
+    def mark_timing(self, turn, key):
+        if turn == self.turn_id and self.timing.get("turn_id") == turn:
+            self.timing.setdefault(key, round(time.monotonic() - self.started, 3))
+
     def played(self, turn):
         if turn == self.turn_id and not any(m["turn_id"] == turn for m in self.metrics):
             self.metrics.append(
                 {
+                    **self.timing,
                     "turn_id": turn,
                     "first_audio_seconds": round(time.monotonic() - self.started, 3),
                 }

@@ -22,13 +22,18 @@ class BilingualParser:
 
     def feed(self, chunk: str) -> list[Sentence]:
         self.buffer += chunk
-        if len(self.buffer) > 16384:
-            raise ValueError("双语回复过长或格式不完整，请重试")
         result = []
-        while "\n" in self.buffer:
-            line, self.buffer = self.buffer.split("\n", 1)
-            if line.strip():
-                result.append(self._parse(line))
+        while self.buffer.strip():
+            self.buffer = self.buffer.lstrip()
+            try:
+                _, end = json.JSONDecoder().raw_decode(self.buffer)
+            except ValueError:
+                # A newline inside an unfinished object is invalid NDJSON.
+                if "\n" in self.buffer or len(self.buffer) > 16384:
+                    raise ValueError("双语回复过长或格式不完整，请重试")
+                break
+            result.append(self._parse(self.buffer[:end]))
+            self.buffer = self.buffer[end:]
         return result
 
     def finish(self) -> list[Sentence]:

@@ -661,6 +661,15 @@ def create_app(
                             finally:
                                 changing_thinking = False
                             await broadcast_model_change()
+                    elif kind == "voice-tone-policy":
+                        if not owner:
+                            raise ValueError("只有主人可以设置日常语气")
+                        if not voices:
+                            raise ValueError("当前语音未启用托管，不能设置语气")
+                        mode, tone = data.get("mode"), data.get("tone")
+                        voices.validate_tone_policy(mode, tone)
+                        await stop_all()
+                        await voices.set_tone_policy(mode, tone)
                     elif kind == "voice-switch":
                         if not voices:
                             raise ValueError("当前语音未启用托管，不能在界面切换")
@@ -854,6 +863,7 @@ def create_app(
                         else:
                             await sharing.change_password(data.get("password"))
                         await share_status()
+                        await send({"type": "sharing-result", "operation": kind})
                     elif kind == "guests-list":
                         await guest_list()
                     elif kind in {"guest-history", "guest-memories"}:
@@ -938,5 +948,9 @@ def create_app(
                 "/", StaticFiles(directory=frontend, html=True), name="desktop"
             )
 
+    audition = root / ".runtime/voice-auditions"
+    # Host-only local samples: never mounted on the LAN guest application.
+    if audition.is_dir():
+        app.mount("/voice-auditions", StaticFiles(directory=audition, html=True), name="voice-auditions")
     mount_assets(app)
     return app

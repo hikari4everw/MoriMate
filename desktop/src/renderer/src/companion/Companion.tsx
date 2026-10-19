@@ -23,6 +23,8 @@ type Memory = { id: number; kind: string; text: string; evidence: string; origin
 type WindowItem = { id: number; app: string; title: string };
 type AudioPacket = { turn_id: number; sentence_id: number; audio: string | null; display_text: { text: string }; tts_text: string; expires_at_ms?: number; actions?: { expressions?: string[] } };
 type VoiceProfile = { key: string; label: string; engine: string; engine_label: string };
+type TurnTiming = { turn_id?: number; first_audio_seconds?: number; queue_seconds?: number; first_token_seconds?: number; model_wait_seconds?: number; synthesis_seconds?: number; audio_sent_seconds?: number };
+const toneLabels: Record<string, string> = { neutral: '默认（与慵懒同一参考）', lazy: '慵懒', aggrieved: '委屈', shy: '害羞', combat: '战斗', affectionate: '撒娇', relieved: '欣慰', self_deprecating: '自嘲', reproachful: '责备' };
 type Status = { cloud?: boolean; cloud_provider?: string; cloud_model?: string; cloud_guests_allowed?: boolean; observing: boolean; muted: boolean; proactive: boolean; intensity: string; scene: string;
   role?: 'owner' | 'guest'; guest_label?: string; capabilities?: { observe: boolean; admin: boolean }; changed_by?: string;
   voice_label?: string; model?: string; managed_models?: boolean; active_model_key?: string | null;
@@ -31,7 +33,8 @@ type Status = { cloud?: boolean; cloud_provider?: string; cloud_model?: string; 
   managed_voices?: boolean; available_voices?: VoiceProfile[]; active_voice_key?: string | null;
   target_voice_key?: string | null; failed_voice_key?: string | null; voice_phase?: string;
   voice_error?: string; voice_recovery?: string;
-  supports_vision?: boolean; metrics: { first_audio_seconds: number }[]; summary?: { text: string } };
+  voice_tone_mode?: 'fixed' | 'auto'; fixed_voice_tone?: string; voice_tone_confirmed?: boolean;
+  supports_vision?: boolean; metrics: TurnTiming[]; summary?: { text: string } };
 
 function Avatar() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -66,6 +69,7 @@ function Companion({ session, onSessionExpired }: { session: Session; onSessionE
   const [panelMessages, setPanelMessages] = useState<PanelInbox>({});
   const [reconnectKey, setReconnectKey] = useState(0);
   const [audioReady, setAudioReady] = useState(false);
+  const [timing, setTiming] = useState<TurnTiming>({});
   const audioElement = useRef<HTMLAudioElement | null>(null);
   const isOwner = session.role === 'owner';
   const canObserve = isOwner && status.capabilities?.observe !== false;
@@ -146,9 +150,10 @@ function Companion({ session, onSessionExpired }: { session: Session; onSessionE
       ws.onmessage = event => {
         if (socket.current !== ws) return;
         const data = JSON.parse(event.data);
-        if (['persona', 'sharing-status', 'guests-list', 'guest-history', 'guest-memories', 'cloud-connections', 'cloud-usage', 'cloud-test-result', 'cloud-test-status', 'context-trace', 'memory-history', 'memory-archive', 'error'].includes(data.type)) setPanelMessages(previous => ({ ...previous, [data.type]: data }));
+        if (['persona', 'sharing-status', 'sharing-result', 'guests-list', 'guest-history', 'guest-memories', 'cloud-connections', 'cloud-usage', 'cloud-test-result', 'cloud-test-status', 'context-trace', 'memory-history', 'memory-archive', 'error'].includes(data.type)) setPanelMessages(previous => ({ ...previous, [data.type]: data }));
         if (data.type === 'memory-invalidated') setPanelMessages(previous => { const next = { ...previous }; delete next['context-trace']; return next; });
         if (data.type === 'status') { setStatus(data); setConfigPending(false); setVoicePending(false); muted.current = data.muted; }
+        if (data.type === 'turn-timing' && queue.accepts(data.turn_id)) setTiming(data);
         if (data.type === 'history') setHistory(data.items.filter((i: History) => i.kind !== 'observation'));
         if (data.type === 'memories') setMemories(data.items);
         if (data.type === 'windows') setWindows(data.items);
@@ -164,6 +169,7 @@ function Companion({ session, onSessionExpired }: { session: Session; onSessionE
           if (data.state === 'running') { setWaiting('正在生成回复…'); }
         }
         if (data.type === 'control' && data.text === 'conversation-chain-start' && queue.begin(data.turn_id)) {
+          setTiming({ turn_id: data.turn_id });
           silent.current = false; setBusy(true); textReceived = false;
           waitTimer = setTimeout(() => setWaiting(textReceived ? '文字已显示，正在准备语音…' : '还在认真想，可以随时发新消息打断。'), data.wait_after_ms || 8000);
         }
@@ -283,7 +289,12 @@ function Companion({ session, onSessionExpired }: { session: Session; onSessionE
           {!status.managed_voices && <option value="">{status.voice_label || '当前音色'}</option>}
           {profiles.filter(item => item.engine === selectedVoice?.engine).map(item => <option key={item.key} value={item.key}>{item.label}</option>)}
         </select></label>
-        <small role="status">{voiceSwitching ? `${voicePhaseLabel[status.voice_phase || ''] || '正在切换语音'} · ${selectedVoice?.label || ''}` : status.voice_phase === 'error' ? voicePhaseLabel.error : `当前声音：${status.voice_label || '本地语音'} · 自动语气`}</small>
+        {status.managed_voices && <>
+          <label>语气模式<select aria-label="语气模式" disabled={!isOwner || !connected || switching} value={status.voice_tone_mode || 'fixed'} onChange={event => send({ type: 'voice-tone-policy', mode: event.target.value, tone: status.fixed_voice_tone || 'neutral' })}><option value="fixed">固定日常语气</option><option value="auto">自动语气</option></select></label>
+          <label>日常参考<select aria-label="日常参考" disabled={!isOwner || !connected || switching} value={status.fixed_voice_tone || 'neutral'} onChange={event => send({ type: 'voice-tone-policy', mode: 'fixed', tone: event.target.value })}>{Object.entries(toneLabels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>
+          {isOwner && <><button disabled={!connected || switching} onClick={() => send({ type: 'voice-tone-policy', mode: 'fixed', tone: status.fixed_voice_tone || 'neutral' })}>设为日常固定语气</button><a href={`${BASE}/voice-auditions/`} target="_blank" rel="noreferrer">各语气同文试听</a></>}
+        </>}
+        <small role="status">{voiceSwitching ? `${voicePhaseLabel[status.voice_phase || ''] || '正在切换语音'} · ${selectedVoice?.label || ''}` : status.voice_phase === 'error' ? voicePhaseLabel.error : `当前声音：${status.voice_label || '本地语音'} · ${status.voice_tone_mode === 'auto' ? '自动语气' : `固定：${toneLabels[status.fixed_voice_tone || 'neutral']}${status.voice_tone_confirmed ? '' : '（暂定，待试听）'}`}`}</small>
         {status.voice_error && <div role="alert" className="error">{status.voice_error}<br />{status.voice_recovery}<button disabled={!connected || switching} onClick={() => changeVoice(status.failed_voice_key || status.target_voice_key || selectedVoice?.key)}>重试语音</button></div>}
       </div>
       {status.changed_by && <small role="status">最近由{status.changed_by}调整共享配置</small>}
@@ -323,7 +334,12 @@ function Companion({ session, onSessionExpired }: { session: Session; onSessionE
       </div>
       {error && <div role="alert" className="error" onClick={() => setError('')}>{error}</div>}
       <form onSubmit={e => { e.preventDefault(); submit(); }}><input aria-label="输入中文消息" value={input} maxLength={4000} onChange={e => setInput(e.target.value)} placeholder="想聊点什么？" /><button className="primary" disabled={!connected || modelUnavailable || !input.trim()}>发送</button></form>
-      <footer>中文显示 · 日语发声 · {status.voice_label || '本地语音'}{status.metrics.length > 0 && ` · 最近首句 ${status.metrics.at(-1)?.first_audio_seconds}s`}</footer>
+      <footer>中文显示 · 日语发声 · {status.voice_label || '本地语音'}
+        {timing.queue_seconds !== undefined && ` · 排队 ${timing.queue_seconds}s`}
+        {timing.model_wait_seconds !== undefined && ` · 模型首句 ${timing.model_wait_seconds}s`}
+        {timing.synthesis_seconds !== undefined && ` · 语音合成 ${timing.synthesis_seconds}s`}
+        {status.metrics.at(-1)?.first_audio_seconds !== undefined && ` · 最近开始播放共 ${status.metrics.at(-1)?.first_audio_seconds}s`}
+      </footer>
     </section>
   </main>;
 }

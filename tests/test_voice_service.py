@@ -15,6 +15,34 @@ from test_voices import catalog
 FIXTURE = Path(__file__).with_name("fixtures") / "voice_server.py"
 
 
+async def test_fixed_tone_defaults_to_neutral_and_persists_without_changing_engine(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    manager = VoiceService(tmp_path, catalog=catalog(tmp_path))
+    manager.phase = "ready"
+    manager.process = SimpleNamespace(poll=lambda: None)
+    manager.active_key = "roxy"
+    manager.synthesizer = SimpleNamespace(synthesize=AsyncMock(return_value="audio.wav"))
+    assert manager.snapshot()["voice_tone_mode"] == "fixed"
+    assert manager.snapshot()["voice_tone_confirmed"] is False
+    await manager.synthesize("はい。", "combat")
+    manager.synthesizer.synthesize.assert_awaited_with("はい。", "neutral")
+    await manager.set_tone_policy("fixed", "relieved")
+    await manager.synthesize("はい。", "combat")
+    manager.synthesizer.synthesize.assert_awaited_with("はい。", "relieved")
+    restored = VoiceService(tmp_path, catalog=manager.catalog)
+    assert restored.snapshot()["fixed_voice_tone"] == "relieved"
+    assert restored.snapshot()["voice_tone_confirmed"] is True
+    await manager.set_tone_policy("auto", "relieved")
+    await manager.synthesize("はい。", "shy")
+    manager.synthesizer.synthesize.assert_awaited_with("はい。", "shy")
+    with pytest.raises(ValueError):
+        await manager.set_tone_policy("unknown", "neutral")
+    with pytest.raises(ValueError):
+        await manager.set_tone_policy("fixed", "unknown")
+    assert manager.active_key == "roxy"
+
+
 def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))

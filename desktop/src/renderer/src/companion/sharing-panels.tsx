@@ -40,21 +40,28 @@ export function SharingPanel({ send, messages, connected }: { send: Send; messag
   const [before, setBefore] = useState<number | null>(null);
   const [notice, setNotice] = useState('');
   const [pending, setPending] = useState(false);
-  useEffect(() => { if (connected) { send({ type: 'sharing-status' }); send({ type: 'guests-list' }); } }, [send, connected]);
+  useEffect(() => { if (connected) { setPending(false); send({ type: 'sharing-status' }); send({ type: 'guests-list' }); } }, [send, connected]);
   const snapshot = messages['sharing-status'];
   const error = messages.error;
   const guestList = messages['guests-list'];
   const guestHistory = messages['guest-history'];
   const guestMemories = messages['guest-memories'];
+  const result = messages['sharing-result'];
+  useEffect(() => {
+    if (result) {
+      setPending(false);
+      if (result.operation === 'sharing-password-set') { setPassword(''); setNotice('访问密码已保存，现在可以开启局域网共享。'); }
+      else setNotice(result.operation === 'sharing-enable' ? '局域网共享已开启。' : '局域网共享已关闭。');
+    }
+  }, [result]);
   useEffect(() => {
     if (snapshot) {
-      setSharing(snapshot); setPending(false);
+      setSharing(snapshot);
       setAddress(old => snapshot.addresses?.some((item: any) => item.address === old) ? old : snapshot.address);
-      if (snapshot.password_set) setPassword('');
       send({ type: 'guests-list' });
     }
   }, [snapshot, send]);
-  useEffect(() => { if (error) setPending(false); }, [error]);
+  useEffect(() => { if (error) { setPending(false); setNotice(error.message || '操作失败，请重试。'); } }, [error]);
   useEffect(() => {
     if (guestList) {
       setGuests(guestList.items);
@@ -78,14 +85,20 @@ export function SharingPanel({ send, messages, connected }: { send: Send; messag
     try { await navigator.clipboard.writeText(sharing.url); setNotice('地址已复制'); }
     catch { setNotice('复制不可用，请选中下面的地址手动复制'); }
   };
+  const passwordLength = Array.from(password).length;
+  const saveReason = !connected ? '服务未连接，请等待重连。' : pending ? '正在处理，请稍候。' : passwordLength < 4 || passwordLength > 128 ? '请输入 4–128 个字符后保存访问密码。' : '';
+  const enableReason = !connected ? '服务未连接，请等待重连。' : pending ? '正在处理，请稍候。' : !sharing ? '正在读取共享状态。' : !sharing.enabled && !sharing.password_set ? '请先保存访问密码。' : !sharing.enabled && !address ? '请先选择局域网地址。' : '';
   return <div className="settings scroll sharing-panel">
     <h3>局域网共享</h3>
     <p>每次启动默认关闭。访客输入地址和访问密码后进入自己的空间，不能使用屏幕感知。</p>
-    <label>访问密码<input aria-label="设置访问密码" type="password" autoComplete="new-password" value={password} minLength={8} maxLength={128} placeholder={sharing?.password_set ? '已设置；输入新密码可重设' : '首次开启前设置 8–128 字符密码'} onChange={event => setPassword(event.target.value)} /></label>
-    <button disabled={!connected || pending || password.length < 8} onClick={() => { if (!sharing?.enabled || window.confirm('修改密码会断开所有访客，保留他们的数据。继续？')) { setPending(true); send({ type: 'sharing-password-set', password }); } }}>保存访问密码</button>
+    <label>访问密码<input aria-label="设置访问密码" aria-describedby="sharing-password-help" type="password" autoComplete="new-password" value={password} minLength={4} placeholder={sharing?.password_set ? '已设置；输入新密码可重设' : '首次开启前设置 4–128 字符密码'} onChange={event => setPassword(event.target.value)} /></label>
+    <small id="sharing-password-help">访问密码为 4–128 个字符，仅用于本地局域网测试。{sharing?.password_set ? '当前已设置密码。' : ''}</small>
+    <button disabled={!!saveReason} title={saveReason} onClick={() => { if (!sharing?.enabled || window.confirm('修改密码会断开所有访客，保留他们的数据。继续？')) { setNotice(''); setPending(true); send({ type: 'sharing-password-set', password }); } }}>保存访问密码</button>
+    {saveReason && <small>{saveReason}</small>}
     <label>局域网地址<select aria-label="局域网地址" value={address} disabled={sharing?.enabled || pending} onChange={event => setAddress(event.target.value)}><option value="">选择网卡地址</option>{sharing?.addresses?.map((item: any) => <option key={item.address} value={item.address}>{item.label}</option>)}</select></label>
     {sharing && !sharing.addresses?.length && <p>未检测到可用的局域网 IPv4，请连接 Wi-Fi 或有线网络后重新打开共享页。</p>}
-    <button className="primary" disabled={!connected || pending || (!sharing?.enabled && (!sharing?.password_set || !address))} onClick={() => { setPending(true); send(sharing?.enabled ? { type: 'sharing-disable' } : { type: 'sharing-enable', address }); }}>{pending ? '正在处理…' : sharing?.enabled ? '关闭共享并断开访客' : '开启局域网共享'}</button>
+    <button className="primary" disabled={!!enableReason} title={enableReason} onClick={() => { setNotice(''); setPending(true); send(sharing?.enabled ? { type: 'sharing-disable' } : { type: 'sharing-enable', address }); }}>{pending ? '正在处理…' : sharing?.enabled ? '关闭共享并断开访客' : '开启局域网共享'}</button>
+    {enableReason && <small>{enableReason}</small>}
     <p role="status">{sharing?.enabled ? `共享已开启 · 在线访客 ${sharing.online} 人` : '共享已关闭'}</p>
     {sharing?.url && <><input aria-label="访客访问地址" readOnly value={sharing.url} onFocus={event => event.target.select()} /><button onClick={copyAddress}>复制访问地址</button></>}
     {notice && <p role="status">{notice}</p>}

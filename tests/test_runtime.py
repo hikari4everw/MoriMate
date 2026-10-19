@@ -21,6 +21,117 @@ class NoVoice:
         raise AssertionError("mute must bypass TTS")
 
 
+async def test_first_object_speaks_before_newline_and_model_completion(tmp_path):
+    release, synthesized = asyncio.Event(), asyncio.Event()
+    sent = []
+
+    class PausingModel:
+        async def stream(self, *args, **kwargs):
+            yield '{"zh":"先说一句。","ja":"はい。"}'
+            await release.wait()
+            yield '\n{"zh":"再说一句。","ja":"またね。"}'
+
+    class Voice:
+        async def synthesize(self, text, tone):
+            synthesized.set()
+            from test_voices import wav_bytes
+            path = tmp_path / "speech.wav"
+            path.write_bytes(wav_bytes())
+            return str(path)
+
+    async def send(payload):
+        sent.append(payload)
+
+    runtime = CompanionRuntime(MemoryStore(tmp_path / "m.db"), PausingModel(), Voice(), send, "persona")
+    try:
+        await runtime.start("测试")
+        await asyncio.wait_for(synthesized.wait(), 0.3)
+        await asyncio.sleep(0)
+        assert not runtime.task.done()
+        assert any(p["type"] == "audio" and p["audio"] for p in sent)
+        release.set()
+        await runtime.task
+    finally:
+        release.set()
+        await runtime.stop()
+
+
+async def test_timing_separates_model_sentence_synthesis_and_playback(tmp_path):
+    sent = []
+
+    class Voice:
+        async def synthesize(self, text, tone):
+            from test_voices import wav_bytes
+            await asyncio.sleep(0.01)
+            path = tmp_path / "speech.wav"
+            path.write_bytes(wav_bytes())
+            return str(path)
+
+    async def send(payload):
+        sent.append(payload)
+
+    runtime = CompanionRuntime(MemoryStore(tmp_path / "m.db"), FakeModel(), Voice(), send, "persona")
+    await runtime.start("测试")
+    await runtime.task
+    runtime.played(runtime.turn_id)
+    row = runtime.metrics[-1]
+    assert row["queue_seconds"] >= 0
+    assert row["generation_started_seconds"] <= row["first_token_seconds"] <= row["first_sentence_seconds"] <= row["synthesis_started_seconds"] <= row["synthesis_finished_seconds"] <= row["first_audio_seconds"]
+    assert row["synthesis_seconds"] >= 0.009
+    assert row["model_wait_seconds"] == row["first_sentence_seconds"] - row["generation_started_seconds"] or abs(row["model_wait_seconds"] - (row["first_sentence_seconds"] - row["generation_started_seconds"])) < 0.002
+    assert any(p["type"] == "turn-timing" for p in sent)
+    assert all("text" not in key and "ja" not in key for key in row)
+    runtime.played(runtime.turn_id)
+    assert len(runtime.metrics) == 1
+
+
+async def test_timing_tracks_first_real_audio_after_failed_sentence(tmp_path):
+    from test_voices import wav_bytes
+    class Model:
+        async def stream(self, *args, **kwargs):
+            yield '{"zh":"一","ja":"一"}\n{"zh":"二","ja":"二"}'
+
+    class Voice:
+        async def synthesize(self, text, tone):
+            if text == "一":
+                raise RuntimeError("first synthesis failed")
+            path = tmp_path / "speech.wav"
+            path.write_bytes(wav_bytes())
+            return str(path)
+
+    sent = []
+    async def send(payload):
+        sent.append(payload)
+
+    runtime = CompanionRuntime(MemoryStore(tmp_path / "m.db"), Model(), Voice(), send, "persona")
+    await runtime.start("test")
+    await runtime.task
+    runtime.played(runtime.turn_id)
+    row = runtime.metrics[-1]
+    assert row["audio_sentence_id"] == 2
+    assert row["synthesis_finished_seconds"] <= row["audio_sent_seconds"] <= row["first_audio_seconds"]
+    assert row["synthesis_failures"] == 1
+    assert row["audio_status"] == "ready"
+    first_empty = next(p for p in sent if p["type"] == "audio")
+    assert first_empty["audio"] is None
+    await runtime.start("muted")
+    await runtime.stop()
+
+
+async def test_muted_timing_never_claims_audio_was_sent(tmp_path):
+    sent = []
+    async def send(payload):
+        sent.append(payload)
+    runtime = CompanionRuntime(MemoryStore(tmp_path / "m.db"), FakeModel(), NoVoice(), send, "persona")
+    runtime.muted = True
+    await runtime.start("test")
+    await runtime.task
+    timing = [p for p in sent if p["type"] == "turn-timing"][-1]
+    assert "audio_sent_seconds" not in timing
+    assert "synthesis_seconds" not in timing
+    assert timing["audio_status"] == "muted"
+
+
 async def test_cancel_after_voice_returns_cleans_unclaimed_audio(tmp_path):
     output = tmp_path / "unclaimed.wav"
 

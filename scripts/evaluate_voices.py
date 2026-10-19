@@ -75,7 +75,8 @@ async def evaluate(args):
             tones = sorted(VOICE_TONES) if index < 2 else ["neutral"]
             for tone in tones:
                 started = time.monotonic()
-                path = await manager.synthesize(args.text, tone)
+                # Evaluation compares requested references, regardless of daily fixed tone.
+                path = await manager.synthesizer.synthesize(args.text, tone)
                 elapsed = time.monotonic() - started
                 output = destination / f"{index}-{key}-{tone}.wav"
                 shutil.move(path, output)
