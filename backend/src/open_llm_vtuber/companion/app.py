@@ -36,6 +36,10 @@ GUEST_COMMANDS = {
     "memory-edit",
     "scene-clear",
     "memories",
+    "memory-archive",
+    "memory-retry",
+    "memory-rebuild",
+    "memory-confirm",
     "status",
     "persona-get",
     "persona-set",
@@ -395,6 +399,9 @@ def create_app(
             await send(
                 {"type": "history", "items": runtime.store.sources(runtime.scene, 60)}
             )
+            await send({"type": "memory-history", "items": runtime.store.memories(include_history=True),
+                        "checkpoints": runtime.store.checkpoints(runtime.scene),
+                        "maintenance_error": getattr(getattr(runtime, "memory_worker", None), "error", "")})
             await send({"type": "memories", "items": runtime.store.memories()})
 
         async def observe():
@@ -781,16 +788,34 @@ def create_app(
                             )
 
                         await launch_capture(look_at_window)
-                    elif kind in {"memory-delete", "memory-edit", "scene-clear"}:
+                    elif kind in {"memory-delete", "memory-edit", "scene-clear", "memory-confirm", "memory-rebuild", "memory-retry"}:
                         await runtime.stop()
                         playing = False
                         if kind == "memory-delete":
-                            runtime.store.forget(int(data["id"]))
+                            runtime.store.forget(int(data["id"]), mode=data.get("mode", "exclude"))
                         elif kind == "memory-edit":
                             runtime.store.correct(int(data["id"]), str(data["text"]))
+                        elif kind == "memory-confirm":
+                            runtime.store.confirm(int(data["id"]))
+                        elif kind == "memory-rebuild":
+                            runtime.store.rebuild_summary(runtime.scene)
+                            if hasattr(runtime, "memory_worker"):
+                                runtime.memory_worker.retry()
+                        elif kind == "memory-retry":
+                            if hasattr(runtime, "memory_worker"):
+                                runtime.memory_worker.retry()
                         else:
                             runtime.store.clear_scene(runtime.scene)
+                        runtime.context_bundle = None
+                        await send({"type": "memory-invalidated"})
                         await history()
+                    elif kind == "memory-archive":
+                        before = data.get("before")
+                        if before is not None and (type(before) is not int or before < 1):
+                            raise ValueError("历史分页参数无效")
+                        archive = runtime.store.archive(before)
+                        await send({"type": "memory-archive", **archive,
+                                    "next_before": archive['sources'][0]['id'] if len(archive['sources']) == 60 else None})
                     elif kind == "memories":
                         await history()
                     elif kind == "persona-get":

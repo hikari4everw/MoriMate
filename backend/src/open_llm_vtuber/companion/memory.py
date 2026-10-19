@@ -1,4 +1,5 @@
 import json
+from contextlib import contextmanager
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,7 +40,7 @@ class MemoryStore:
 
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(memories)")}
         if "scene" not in columns:
-            with self.db:
+            with self.write():
                 self.db.execute("ALTER TABLE memories ADD COLUMN scene TEXT")
                 for memory in self.memories():
                     if memory["origin"] in {"observation", "user_edit"}:
@@ -53,6 +54,8 @@ class MemoryStore:
         from .memory_migrations import migrate_provenance
         migrate_provenance(self.db)
         self.db.execute("CREATE TABLE IF NOT EXISTS assistant_memory_dependencies(source_id INTEGER NOT NULL,memory_id INTEGER NOT NULL,PRIMARY KEY(source_id,memory_id))")
+        self.db.commit()
+        self.db.execute("CREATE TABLE IF NOT EXISTS summary_checkpoints(id INTEGER PRIMARY KEY,scene TEXT,text TEXT,source_ids TEXT,epoch INTEGER,created TEXT)")
         self.db.commit()
 
     def migrate_v2(self):
@@ -68,6 +71,20 @@ class MemoryStore:
             "summaries": [dict(row) for row in self.db.execute("SELECT * FROM summaries WHERE epoch=0")],
         }
 
+    @contextmanager
+    def write(self):
+        if self.db.in_transaction:
+            yield
+            return
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self.db.rollback()
+            raise
+        else:
+            self.db.commit()
+
     def close(self):
         self.db.close()
 
@@ -82,7 +99,7 @@ class MemoryStore:
             not isinstance(text, str) or not text.strip() or len(text) > 16000
         ):
             raise ValueError("人格提示词需为 1–16000 字，且不能全为空白")
-        with self.db:
+        with self.write():
             if text is None:
                 self.db.execute("DELETE FROM profile WHERE key='persona'")
             else:
@@ -103,7 +120,7 @@ class MemoryStore:
     ) -> int:
         if kind not in {"user", "assistant", "observation"}:
             raise ValueError("Unknown source kind")
-        with self.db:
+        with self.write():
             if kind == "user" or (kind == "assistant" and self.current_turn is None):
                 turn = self.db.execute("INSERT INTO conversation_turns(scene,epoch) VALUES(?,?)", (scene, self.epoch))
                 self.current_turn = turn.lastrowid
@@ -201,7 +218,7 @@ class MemoryStore:
             if not previous or previous["scene"] != scene or previous["kind"] != candidate.kind:
                 return None
         state = "pending" if previous and not candidate.explicit_change else "active"
-        with self.db:
+        with self.write():
             if previous and state == "active":
                 self.db.execute("UPDATE memories SET state='superseded' WHERE id=?", (previous["id"],))
             cur = self.db.execute(
@@ -231,6 +248,9 @@ class MemoryStore:
         memories = self.memories(include_history=True)
         affected = {m['id'] for m in memories if m['topic'] == row['topic']}
         ids = {source for m in memories if m['id'] in affected for source in json.loads(m['source_ids'])}
+        evidence = [m['evidence'] for m in memories if m['id'] in affected and m['origin'] != 'user_edit' and len(m['evidence']) >= 2]
+        ids.update(r['id'] for r in self.db.execute("SELECT id,text FROM sources WHERE epoch=? AND kind=? AND (? IS NULL OR scene=?) AND redacted=0", (self.epoch, "observation" if row["scene"] is not None else "user", row["scene"], row["scene"]))
+                   if any(quote in r['text'] for quote in evidence))
         ids.update(r['source_id'] for r in self.db.execute("SELECT * FROM assistant_memory_dependencies") if r['memory_id'] in affected)
         while True:
             expanded = set(ids)
@@ -255,19 +275,22 @@ class MemoryStore:
         for summary in self.db.execute("SELECT scene,source_ids FROM summaries WHERE epoch=?", (self.epoch,)).fetchall():
             if ids.intersection(json.loads(summary['source_ids'])):
                 self.db.execute("DELETE FROM summaries WHERE scene=? AND epoch=?", (summary['scene'], self.epoch))
+        for checkpoint in self.db.execute("SELECT id,source_ids FROM summary_checkpoints WHERE epoch=?", (self.epoch,)).fetchall():
+            if ids.intersection(json.loads(checkpoint['source_ids'])):
+                self.db.execute('DELETE FROM summary_checkpoints WHERE id=?', (checkpoint['id'],))
         self._changed()
         return dict(row)
 
     def forget(self, item_id, mode="exclude"):
         if mode not in {"exclude", "erase"}:
             raise ValueError("遗忘模式无效")
-        with self.db:
+        with self.write():
             self._invalidate(item_id, erase=mode == 'erase')
 
     def correct(self, item_id, text):
         if not text.strip() or len(text) > 600:
             raise ValueError("记忆需为 1–600 字")
-        with self.db:
+        with self.write():
             old = self._invalidate(item_id)
             self.db.execute("UPDATE memories SET state='superseded' WHERE id=?", (item_id,))
             cur = self.db.execute(
@@ -279,11 +302,13 @@ class MemoryStore:
     def save_summary(self, scene: str, text: str, source_ids: list[int]) -> str | None:
         if not text.strip() or len(text) > 3000 or not self._valid_sources(source_ids):
             return None
-        with self.db:
+        with self.write():
             self.db.execute(
                 "INSERT OR REPLACE INTO summaries(scene,text,source_ids,epoch) VALUES(?,?,?,?)",
                 (scene, text, json.dumps(sorted(set(source_ids))), self.epoch),
             )
+            self.db.execute('INSERT INTO summary_checkpoints(scene,text,source_ids,epoch,created) VALUES(?,?,?,?,?)',
+                            (scene, text, json.dumps(sorted(set(source_ids))), self.epoch, datetime.now(timezone.utc).isoformat()))
         return text
 
     def summary(self, scene: str) -> dict | None:
@@ -297,13 +322,13 @@ class MemoryStore:
         return result
 
     def mark_processed(self, ids: list[int]):
-        with self.db:
+        with self.write():
             self.db.executemany(
                 "UPDATE sources SET processed=1 WHERE id=?", [(i,) for i in ids]
             )
 
     def clear_scene(self, scene: str):
-        with self.db:
+        with self.write():
             self.db.execute("DELETE FROM memories WHERE scene=? AND epoch=?", (scene, self.epoch))
             ids = {
                 r["id"]
@@ -319,3 +344,23 @@ class MemoryStore:
                 (scene, self.epoch),
             )
             self.db.execute("DELETE FROM summaries WHERE scene=? AND epoch=?", (scene, self.epoch))
+            self.db.execute("DELETE FROM summary_checkpoints WHERE scene=? AND epoch=?", (scene, self.epoch))
+            self._changed()
+
+    def checkpoints(self, scene):
+        return [dict(row) for row in self.db.execute('SELECT * FROM summary_checkpoints WHERE scene=? AND epoch=? ORDER BY id DESC LIMIT 20', (scene, self.epoch))]
+
+    def rebuild_summary(self, scene):
+        with self.write():
+            self.db.execute('DELETE FROM summaries WHERE scene=? AND epoch=?', (scene, self.epoch))
+            self.db.execute('UPDATE sources SET processed=0 WHERE scene=? AND epoch=? AND redacted=0 AND prompt_excluded=0', (scene, self.epoch))
+            self._changed()
+
+    def confirm(self, item_id):
+        with self.write():
+            item = self.db.execute("SELECT * FROM memories WHERE id=? AND epoch=? AND state='pending'", (item_id, self.epoch)).fetchone()
+            if not item or not self._valid_sources(json.loads(item['source_ids'])):
+                raise ValueError('待确认记忆不存在或来源已失效')
+            self.db.execute("UPDATE memories SET state='superseded' WHERE topic=? AND state='active' AND epoch=?", (item['topic'], self.epoch))
+            self.db.execute("UPDATE memories SET state='active' WHERE id=?", (item_id,))
+            self._changed()

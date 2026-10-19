@@ -42,3 +42,8 @@ html, body, #root { width:100%;height:100%;margin:0;overflow:hidden;background:t
 @media (max-height:520px) and (max-width:760px) {
   .companion.window { grid-template-rows:40px 0 minmax(0,1fr); }.stage { visibility:hidden; }.panel footer { display:none; }
 }
+
+.settings form { display:flex;flex-direction:column;gap:10px; }
+.settings input[type=checkbox] { display:inline-block;width:auto;margin-right:8px; }
+.settings article p { white-space:pre-wrap;overflow-wrap:anywhere; }
+.panel nav { flex-wrap:wrap; }

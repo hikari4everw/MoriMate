@@ -1,4 +1,3 @@
-import json
 import sqlite3
 from open_llm_vtuber.companion.memory import MemoryStore
 
@@ -59,3 +58,21 @@ def test_turn_ids_persist_and_group_assistant_sentences(tmp_path):
     store = MemoryStore(path)
     store.add_source('user', '第二回合')
     assert store.sources()[-1]['conversation_turn'] != first
+
+
+def test_provenance_schema_failure_rolls_back_before_retry(tmp_path):
+    import pytest
+    from open_llm_vtuber.companion.memory_migrations import migrate_v2, migrate_provenance
+    path = tmp_path / 'migration.db'
+    legacy(path)
+    db = sqlite3.connect(path)
+    migrate_v2(db, path)
+    def authorize(action, arg1, arg2, database, trigger):
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_ALTER_TABLE and arg2 == 'memories' else sqlite3.SQLITE_OK
+    db.set_authorizer(authorize)
+    with pytest.raises(sqlite3.DatabaseError):
+        migrate_provenance(db)
+    db.set_authorizer(None)
+    assert 'prompt_excluded' not in {r[1] for r in db.execute('PRAGMA table_info(sources)')}
+    migrate_provenance(db)
+    assert 'state' in {r[1] for r in db.execute('PRAGMA table_info(memories)')}

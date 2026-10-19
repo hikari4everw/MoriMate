@@ -10,6 +10,7 @@ import { AccessGate, type Session } from './access-gate';
 import { PersonaPanel, SharingPanel, type PanelInbox } from './sharing-panels';
 import './companion.css';
 import { ModelSettings } from './model-settings';
+import { MemoryPanel } from './memory-panel';
 import { modelAccess } from './protocol';
 
 const BASE = window.location.protocol === 'http:' && window.location.port !== '5173'
@@ -145,7 +146,8 @@ function Companion({ session, onSessionExpired }: { session: Session; onSessionE
       ws.onmessage = event => {
         if (socket.current !== ws) return;
         const data = JSON.parse(event.data);
-        if (['persona', 'sharing-status', 'guests-list', 'guest-history', 'guest-memories', 'cloud-connections', 'cloud-usage', 'cloud-test-result', 'error'].includes(data.type)) setPanelMessages(previous => ({ ...previous, [data.type]: data }));
+        if (['persona', 'sharing-status', 'guests-list', 'guest-history', 'guest-memories', 'cloud-connections', 'cloud-usage', 'cloud-test-result', 'context-trace', 'memory-history', 'memory-archive', 'error'].includes(data.type)) setPanelMessages(previous => ({ ...previous, [data.type]: data }));
+        if (data.type === 'memory-invalidated') setPanelMessages(previous => { const next = { ...previous }; delete next['context-trace']; return next; });
         if (data.type === 'status') { setStatus(data); setConfigPending(false); setVoicePending(false); muted.current = data.muted; }
         if (data.type === 'history') setHistory(data.items.filter((i: History) => i.kind !== 'observation'));
         if (data.type === 'memories') setMemories(data.items);
@@ -310,7 +312,7 @@ function Companion({ session, onSessionExpired }: { session: Session; onSessionE
         <h3>最近读到的对白</h3><pre>{ocr || '尚未识别到稳定对白'}</pre>
         {status.summary && <><h3>剧情摘要</h3><p>{status.summary.text}</p></>}
       </div>}
-      {tab === 'memory' && <div className="settings scroll"><p>记忆只从明确来源整理。纠正或删除会同时作废关联摘要与历史，避免旧内容重新出现。</p><button onClick={() => send({ type: 'memories' })}>刷新记忆</button>{memories.length === 0 && <p>还没有长期记忆；聊几轮后会在空闲时整理。</p>}{memories.map(memory => <MemoryCard key={`${memory.id}-${memory.text}`} memory={memory} send={send} />)}<hr /><button onClick={() => { if (window.confirm('清除当前场景的对话、摘要和关联记忆？')) send({ type: 'scene-clear' }); }}>清除当前场景记录</button></div>}
+      {tab === 'memory' && <MemoryPanel send={send} messages={panelMessages} memories={memories} />}
       <div className="controls">
         {canObserve && <button onClick={() => { send({ type: 'observe-stop' }); }} disabled={!status.observing}>停止观察</button>}
         {canObserve && <button onClick={() => settings({ proactive: !status.proactive })}>{status.proactive ? '禁止主动发言' : '允许主动发言'}</button>}
@@ -324,11 +326,6 @@ function Companion({ session, onSessionExpired }: { session: Session; onSessionE
       <footer>中文显示 · 日语发声 · {status.voice_label || '本地语音'}{status.metrics.length > 0 && ` · 最近首句 ${status.metrics.at(-1)?.first_audio_seconds}s`}</footer>
     </section>
   </main>;
-}
-
-function MemoryCard({ memory, send }: { memory: Memory; send: (data: object) => void }) {
-  const [text, setText] = useState(memory.text);
-  return <article className="memory"><textarea value={text} maxLength={600} onChange={e => setText(e.target.value)} /><small>来源：{memory.origin} · {memory.evidence}</small><button disabled={!text.trim() || text === memory.text} onClick={() => send({ type: 'memory-edit', id: memory.id, text })}>保存纠正</button><button onClick={() => send({ type: 'memory-delete', id: memory.id })}>删除</button></article>;
 }
 
 export default function LocalCompanion() {

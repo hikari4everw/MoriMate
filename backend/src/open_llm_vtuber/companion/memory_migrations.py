@@ -39,6 +39,7 @@ def migrate_provenance(db):
     columns = {row[1] for row in db.execute('PRAGMA table_info(sources)')}
     if 'prompt_excluded' in columns:
         return
+    db.execute('BEGIN IMMEDIATE')
     with db:
         db.execute('ALTER TABLE sources ADD COLUMN prompt_excluded INTEGER NOT NULL DEFAULT 0')
         for column, definition in {

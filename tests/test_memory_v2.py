@@ -75,3 +75,26 @@ def test_forgetting_manual_memory_invalidates_its_generated_replies(tmp_path):
     store.add_source('assistant', '人工纠正', dependencies=[], memory_ids=[revised])
     store.forget(revised)
     assert '人工纠正' not in str(store.sources())
+
+
+def test_forget_blocks_repeated_existing_evidence_and_invalidates_checkpoints(tmp_path):
+    store = MemoryStore(tmp_path / 'm.db')
+    first = store.add_source('user', '我喜欢咖啡')
+    item = store.remember('preference', '喜欢咖啡', [first], '喜欢咖啡')
+    second = store.add_source('user', '补充一下，我喜欢咖啡')
+    store.save_summary('daily', '咖啡爱好者', [second])
+    store.forget(item)
+    assert '咖啡' not in str(store.sources())
+    assert store.checkpoints('daily') == []
+
+
+def test_confirm_pending_change_preserves_previous_revision(tmp_path):
+    from open_llm_vtuber.companion.memory_types import MemoryCandidate
+    store = MemoryStore(tmp_path / 'm.db')
+    a = store.add_source('user', '喜欢红茶')
+    old = store.remember('preference', '喜欢红茶', [a], '红茶')
+    b = store.add_source('user', '喜欢绿茶')
+    pending = store.record_memory(MemoryCandidate('preference', '喜欢绿茶', [b], '绿茶', previous_id=old))
+    store.confirm(pending)
+    assert store.memories()[0]['id'] == pending
+    assert store.memories(include_history=True)[-1]['state'] == 'superseded'
