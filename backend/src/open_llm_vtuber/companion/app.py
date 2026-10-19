@@ -193,6 +193,8 @@ def create_app(
             await connection["done"].wait()
 
     async def stop_all():
+        if router:
+            await router.cancel_test()
         for connection in list(connections.values()):
             await connection["stop"]()
 
@@ -600,8 +602,7 @@ def create_app(
                         elif kind == "cloud-usage":
                             await send({"type": "cloud-usage", "items": router.usage.rows()})
                         elif kind == "cloud-save":
-                            await stop_all()
-                            await asyncio.to_thread(router.connections.save, data.get("connection", {}), data.get("api_key"))
+                            await router.configure(data.get("connection", {}), data.get("api_key"), stop=stop_all)
                             await send({"type": "cloud-connections", "items": router.connections.views()})
                             await broadcast_model_change()
                         elif kind == "cloud-delete":
@@ -611,8 +612,7 @@ def create_app(
                             await asyncio.to_thread(router.connections.delete, key)
                             await send({"type": "cloud-connections", "items": router.connections.views()})
                         else:
-                            await router.test_connection(data.get("connection_id"))
-                            await send({"type": "cloud-test-result", "message": "基本调用成功；人格、视觉及语音仍需实际体验"})
+                            router.request_test(data.get("connection_id"), scheduler, send)
                     elif kind in {"model-switch", "thinking-mode"}:
                         if not owner:
                             raise ValueError("没有权限执行此操作")
@@ -685,6 +685,8 @@ def create_app(
                         latest = None
                         await runtime.start(text)
                     elif kind == "interrupt-signal":
+                        if owner:
+                            await router.cancel_test()
                         last_activity = time.monotonic()
                         playing = False
                         latest = None
@@ -904,6 +906,8 @@ def create_app(
             # TestClient and ASGI shutdown can cancel the handler during cleanup.
             with anyio.CancelScope(shield=True):
                 try:
+                    if owner:
+                        await router.cancel_test()
                     await cancel_capture()
                     await stop_observing()
                     maintenance_task.cancel()

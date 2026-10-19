@@ -56,6 +56,8 @@ class MemoryStore:
         self.db.execute("CREATE TABLE IF NOT EXISTS assistant_memory_dependencies(source_id INTEGER NOT NULL,memory_id INTEGER NOT NULL,PRIMARY KEY(source_id,memory_id))")
         self.db.commit()
         self.db.execute("CREATE TABLE IF NOT EXISTS summary_checkpoints(id INTEGER PRIMARY KEY,scene TEXT,text TEXT,source_ids TEXT,epoch INTEGER,created TEXT)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS summary_memory_dependencies(scene TEXT,epoch INTEGER,memory_id INTEGER,PRIMARY KEY(scene,epoch,memory_id))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS checkpoint_memory_dependencies(checkpoint_id INTEGER,memory_id INTEGER,PRIMARY KEY(checkpoint_id,memory_id))")
         self.db.commit()
 
     def migrate_v2(self):
@@ -251,19 +253,23 @@ class MemoryStore:
         evidence = [m['evidence'] for m in memories if m['id'] in affected and m['origin'] != 'user_edit' and len(m['evidence']) >= 2]
         ids.update(r['id'] for r in self.db.execute("SELECT id,text FROM sources WHERE epoch=? AND kind=? AND (? IS NULL OR scene=?) AND redacted=0", (self.epoch, "observation" if row["scene"] is not None else "user", row["scene"], row["scene"]))
                    if any(quote in r['text'] for quote in evidence))
-        ids.update(r['source_id'] for r in self.db.execute("SELECT * FROM assistant_memory_dependencies") if r['memory_id'] in affected)
+        self._invalidate_records(ids, affected, erase=erase)
+        return dict(row)
+
+    def _invalidate_records(self, ids, affected=None, *, erase=False):
+        ids, affected = set(ids), set(affected or [])
+        memories = self.memories(include_history=True)
         while True:
-            expanded = set(ids)
-            for dep in self.db.execute("SELECT source_id,parent_id FROM source_dependencies"):
-                if dep['parent_id'] in ids:
-                    expanded.add(dep['source_id'])
+            previous_ids, previous_memories = set(ids), set(affected)
+            topics = {m['topic'] for m in memories if m['id'] in affected}
             for memory in memories:
-                if expanded.intersection(json.loads(memory['source_ids'])):
+                if memory['topic'] in topics or ids.intersection(json.loads(memory['source_ids'])):
                     affected.add(memory['id'])
-                    expanded.update(json.loads(memory['source_ids']))
-            if expanded == ids:
+                    ids.update(json.loads(memory['source_ids']))
+            ids.update(r['source_id'] for r in self.db.execute("SELECT * FROM assistant_memory_dependencies") if r['memory_id'] in affected)
+            ids.update(r['source_id'] for r in self.db.execute("SELECT * FROM source_dependencies") if r['parent_id'] in ids)
+            if ids == previous_ids and affected == previous_memories:
                 break
-            ids = expanded
         for source in ids:
             self.db.execute("UPDATE sources SET prompt_excluded=1 WHERE id=? AND epoch=?", (source, self.epoch))
             if erase:
@@ -273,13 +279,16 @@ class MemoryStore:
             if erase:
                 self.db.execute("UPDATE memories SET text='',evidence='' WHERE id=?", (memory,))
         for summary in self.db.execute("SELECT scene,source_ids FROM summaries WHERE epoch=?", (self.epoch,)).fetchall():
-            if ids.intersection(json.loads(summary['source_ids'])):
+            memory_ids = {r[0] for r in self.db.execute('SELECT memory_id FROM summary_memory_dependencies WHERE scene=? AND epoch=?', (summary['scene'], self.epoch))}
+            if ids.intersection(json.loads(summary['source_ids'])) or affected.intersection(memory_ids):
                 self.db.execute("DELETE FROM summaries WHERE scene=? AND epoch=?", (summary['scene'], self.epoch))
+                self.db.execute('DELETE FROM summary_memory_dependencies WHERE scene=? AND epoch=?', (summary['scene'], self.epoch))
         for checkpoint in self.db.execute("SELECT id,source_ids FROM summary_checkpoints WHERE epoch=?", (self.epoch,)).fetchall():
-            if ids.intersection(json.loads(checkpoint['source_ids'])):
+            memory_ids = {r[0] for r in self.db.execute('SELECT memory_id FROM checkpoint_memory_dependencies WHERE checkpoint_id=?', (checkpoint['id'],))}
+            if ids.intersection(json.loads(checkpoint['source_ids'])) or affected.intersection(memory_ids):
                 self.db.execute('DELETE FROM summary_checkpoints WHERE id=?', (checkpoint['id'],))
+                self.db.execute('DELETE FROM checkpoint_memory_dependencies WHERE checkpoint_id=?', (checkpoint['id'],))
         self._changed()
-        return dict(row)
 
     def forget(self, item_id, mode="exclude"):
         if mode not in {"exclude", "erase"}:
@@ -299,16 +308,23 @@ class MemoryStore:
                  old['topic'], item_id, datetime.now(timezone.utc).isoformat()))
         return cur.lastrowid
 
-    def save_summary(self, scene: str, text: str, source_ids: list[int]) -> str | None:
+    def save_summary(self, scene: str, text: str, source_ids: list[int], *, memory_ids=None) -> str | None:
         if not text.strip() or len(text) > 3000 or not self._valid_sources(source_ids):
+            return None
+        memory_ids = sorted(set(memory_ids or []))
+        valid_memories = {m['id'] for m in self.memories(include_history=True) if m['state'] != 'excluded'}
+        if not set(memory_ids).issubset(valid_memories):
             return None
         with self.write():
             self.db.execute(
                 "INSERT OR REPLACE INTO summaries(scene,text,source_ids,epoch) VALUES(?,?,?,?)",
                 (scene, text, json.dumps(sorted(set(source_ids))), self.epoch),
             )
-            self.db.execute('INSERT INTO summary_checkpoints(scene,text,source_ids,epoch,created) VALUES(?,?,?,?,?)',
+            checkpoint = self.db.execute('INSERT INTO summary_checkpoints(scene,text,source_ids,epoch,created) VALUES(?,?,?,?,?)',
                             (scene, text, json.dumps(sorted(set(source_ids))), self.epoch, datetime.now(timezone.utc).isoformat()))
+            self.db.execute('DELETE FROM summary_memory_dependencies WHERE scene=? AND epoch=?', (scene, self.epoch))
+            self.db.executemany('INSERT INTO summary_memory_dependencies VALUES(?,?,?)', [(scene, self.epoch, mid) for mid in memory_ids])
+            self.db.executemany('INSERT INTO checkpoint_memory_dependencies VALUES(?,?)', [(checkpoint.lastrowid, mid) for mid in memory_ids])
         return text
 
     def summary(self, scene: str) -> dict | None:
@@ -318,6 +334,7 @@ class MemoryStore:
         if not row:
             return None
         result = dict(row)
+        result['memory_ids'] = [r[0] for r in self.db.execute('SELECT memory_id FROM summary_memory_dependencies WHERE scene=? AND epoch=?', (scene, self.epoch))]
         result.update(self.recorded_range(json.loads(row["source_ids"])) or {})
         return result
 
@@ -327,25 +344,14 @@ class MemoryStore:
                 "UPDATE sources SET processed=1 WHERE id=?", [(i,) for i in ids]
             )
 
-    def clear_scene(self, scene: str):
+    def clear_scene(self, scene):
         with self.write():
-            self.db.execute("DELETE FROM memories WHERE scene=? AND epoch=?", (scene, self.epoch))
-            ids = {
-                r["id"]
-                for r in self.db.execute(
-                    "SELECT id FROM sources WHERE scene=? AND epoch=?", (scene, self.epoch)
-                )
-            }
-            for row in self.db.execute("SELECT id,source_ids FROM memories WHERE epoch=?", (self.epoch,)).fetchall():
-                if ids.intersection(json.loads(row["source_ids"])):
-                    self.db.execute("DELETE FROM memories WHERE id=?", (row["id"],))
-            self.db.execute(
-                "UPDATE sources SET redacted=1,text='',speech=NULL WHERE scene=? AND epoch=?",
-                (scene, self.epoch),
-            )
-            self.db.execute("DELETE FROM summaries WHERE scene=? AND epoch=?", (scene, self.epoch))
-            self.db.execute("DELETE FROM summary_checkpoints WHERE scene=? AND epoch=?", (scene, self.epoch))
-            self._changed()
+            ids = {r[0] for r in self.db.execute('SELECT id FROM sources WHERE scene=? AND epoch=?', (scene, self.epoch))}
+            affected = {m['id'] for m in self.memories(include_history=True) if m['scene'] == scene}
+            self._invalidate_records(ids, affected, erase=True)
+            self.db.execute('DELETE FROM summaries WHERE scene=? AND epoch=?', (scene, self.epoch))
+            self.db.execute('DELETE FROM summary_memory_dependencies WHERE scene=? AND epoch=?', (scene, self.epoch))
+            self.db.execute('DELETE FROM summary_checkpoints WHERE scene=? AND epoch=?', (scene, self.epoch))
 
     def checkpoints(self, scene):
         return [dict(row) for row in self.db.execute('SELECT * FROM summary_checkpoints WHERE scene=? AND epoch=? ORDER BY id DESC LIMIT 20', (scene, self.epoch))]
@@ -353,6 +359,7 @@ class MemoryStore:
     def rebuild_summary(self, scene):
         with self.write():
             self.db.execute('DELETE FROM summaries WHERE scene=? AND epoch=?', (scene, self.epoch))
+            self.db.execute('DELETE FROM summary_memory_dependencies WHERE scene=? AND epoch=?', (scene, self.epoch))
             self.db.execute('UPDATE sources SET processed=0 WHERE scene=? AND epoch=? AND redacted=0 AND prompt_excluded=0', (scene, self.epoch))
             self._changed()
 

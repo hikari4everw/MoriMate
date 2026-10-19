@@ -146,7 +146,7 @@ function Companion({ session, onSessionExpired }: { session: Session; onSessionE
       ws.onmessage = event => {
         if (socket.current !== ws) return;
         const data = JSON.parse(event.data);
-        if (['persona', 'sharing-status', 'guests-list', 'guest-history', 'guest-memories', 'cloud-connections', 'cloud-usage', 'cloud-test-result', 'context-trace', 'memory-history', 'memory-archive', 'error'].includes(data.type)) setPanelMessages(previous => ({ ...previous, [data.type]: data }));
+        if (['persona', 'sharing-status', 'guests-list', 'guest-history', 'guest-memories', 'cloud-connections', 'cloud-usage', 'cloud-test-result', 'cloud-test-status', 'context-trace', 'memory-history', 'memory-archive', 'error'].includes(data.type)) setPanelMessages(previous => ({ ...previous, [data.type]: data }));
         if (data.type === 'memory-invalidated') setPanelMessages(previous => { const next = { ...previous }; delete next['context-trace']; return next; });
         if (data.type === 'status') { setStatus(data); setConfigPending(false); setVoicePending(false); muted.current = data.muted; }
         if (data.type === 'history') setHistory(data.items.filter((i: History) => i.kind !== 'observation'));

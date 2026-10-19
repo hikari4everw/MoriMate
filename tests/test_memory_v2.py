@@ -98,3 +98,16 @@ def test_confirm_pending_change_preserves_previous_revision(tmp_path):
     store.confirm(pending)
     assert store.memories()[0]['id'] == pending
     assert store.memories(include_history=True)[-1]['state'] == 'superseded'
+
+
+def test_clear_scene_invalidates_cross_scene_replies_but_preserves_unrelated_history(tmp_path):
+    store = MemoryStore(tmp_path / 'm.db')
+    source = store.add_source('user', '门禁码秘密123', 'daily')
+    item = store.remember('fact', '门禁码秘密123', [source], '秘密123')
+    store.add_source('user', '帮我回忆', 'game:B')
+    store.add_source('assistant', '门禁码秘密123', 'game:B', dependencies=[source], memory_ids=[item])
+    store.add_source('user', '独立新事情', 'game:B')
+    store.add_source('assistant', '无关回答', 'game:B', dependencies=[])
+    store.clear_scene('daily')
+    assert '秘密123' not in str(store.sources('game:B'))
+    assert '无关回答' in str(store.sources('game:B'))

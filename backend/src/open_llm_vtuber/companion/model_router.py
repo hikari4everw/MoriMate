@@ -29,6 +29,7 @@ class BoundModel:
 
     async def client(self):
         route = self.router
+        version = route.version
         if not route.allowed(self.space):
             raise RuntimeError("主人尚未授权访客使用当前云模型")
         if not route.ready:
@@ -37,7 +38,7 @@ class BoundModel:
             spec = route.cloud_spec
             key = await asyncio.to_thread(route.connections.key, spec.id)
             # Recheck after a potentially interactive Keychain operation.
-            if not route.allowed(self.space) or spec != route.cloud_spec:
+            if not route.ready or version != route.version or not route.allowed(self.space) or spec != route.cloud_spec:
                 raise RuntimeError("模型配置或授权已改变，请重新发送")
             return CloudModel(spec, key, record=lambda result: route.usage.record({
                 **result, "space": self.space, "connection": spec.id, "model": spec.model,
@@ -45,18 +46,27 @@ class BoundModel:
         return route.local.transport if route.local else route.fallback
 
     async def stream(self, messages, max_tokens=400, *, reasoning_budget=0, purpose="chat"):
+        version = self.router.version
         client = await self.client()
         kwargs = {"max_tokens": max_tokens, "reasoning_budget": reasoning_budget}
         if isinstance(client, CloudModel):
             kwargs["purpose"] = purpose
-        async for part in client.stream(messages, **kwargs):
-            yield part
+        async with contextlib.aclosing(client.stream(messages, **kwargs)) as stream:
+            async for part in stream:
+                if version != self.router.version or not self.router.ready or not self.router.allowed(self.space):
+                    raise RuntimeError('模型配置或授权已改变，旧回复已停止')
+                yield part
 
     async def complete(self, messages, max_tokens=800, *, purpose="memory"):
+        version = self.router.version
         client = await self.client()
         if isinstance(client, CloudModel):
-            return await client.complete(messages, max_tokens, purpose=purpose)
-        return await client.complete(messages, max_tokens)
+            result = await client.complete(messages, max_tokens, purpose=purpose)
+        else:
+            result = await client.complete(messages, max_tokens)
+        if version != self.router.version or not self.router.ready or not self.router.allowed(self.space):
+            raise RuntimeError('模型配置或授权已改变，旧结果已丢弃')
+        return result
 
 
 class ModelRouter:
@@ -69,6 +79,9 @@ class ModelRouter:
         self.selection = None
         self.cloud_id = None
         self.task = None
+        self.test_task = None
+        self.configuring = False
+        self.version = 0
         self.on_change = None
         self._phase, self.error = None, ""
         self.fallback_state = fallback_state or {}
@@ -81,6 +94,8 @@ class ModelRouter:
 
     @property
     def phase(self):
+        if self.configuring:
+            return 'stopping'
         return self._phase or (self.local.phase if self.local else 'ready')
 
     @property
@@ -132,8 +147,11 @@ class ModelRouter:
             self.selection = selected
 
     def request_switch(self, selection):
-        if self.task and not self.task.done():
+        if self.configuring or (self.task and not self.task.done()):
             raise RuntimeError('模型正在切换，请稍候')
+        self.version += 1
+        if self.test_task and not self.test_task.done():
+            self.test_task.cancel()
         if isinstance(selection, str) and not selection.startswith('cloud:'):
             if not self.local:
                 raise ValueError('本地模型未启用托管')
@@ -167,6 +185,8 @@ class ModelRouter:
         elif selection not in {'27b', 'qwen38-rp'} or not self.local:
             raise ValueError('当前本地模型未启用托管或模型选择无效')
         self._phase, self.error = 'stopping', ''
+        self.version += 1
+        await self.cancel_test()
         await self.notify()
         try:
             if selection.startswith('cloud:'):
@@ -191,6 +211,7 @@ class ModelRouter:
         await self.notify()
 
     async def close(self):
+        await self.cancel_test()
         if self.task and not self.task.done():
             self.task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -198,6 +219,49 @@ class ModelRouter:
         if self.local:
             await self.local.close()
         self.usage.close()
+
+    async def configure(self, data, api_key=None, *, stop):
+        if self.configuring or (self.task and not self.task.done()):
+            raise RuntimeError('模型配置正在更新')
+        self.configuring = True
+        self.version += 1
+        try:
+            await self.cancel_test()
+            await stop()
+            await self.notify()
+            result = await asyncio.to_thread(self.connections.save, data, api_key)
+        finally:
+            self.configuring = False
+            await self.notify()
+        return result
+
+    def request_test(self, key, scheduler, send):
+        if self.configuring or (self.test_task and not self.test_task.done()):
+            raise RuntimeError('连接配置或测试正在进行')
+        self.connections.get(key)
+        async def run():
+            try:
+                await send({'type': 'cloud-test-status', 'running': True})
+                async with scheduler.slot(0):
+                    await asyncio.wait_for(self.test_connection(key), 30)
+                await send({'type': 'cloud-test-result', 'message': '基本调用成功；人格、视觉及语音仍需实际体验'})
+            except asyncio.CancelledError:
+                with contextlib.suppress(Exception):
+                    await send({'type': 'cloud-test-result', 'message': '连接测试已取消'})
+                raise
+            except Exception as exc:
+                with contextlib.suppress(Exception):
+                    await send({'type': 'error', 'message': '连接测试超时，未自动重试' if isinstance(exc, TimeoutError) else str(exc)})
+            finally:
+                with contextlib.suppress(Exception):
+                    await send({'type': 'cloud-test-status', 'running': False})
+        self.test_task = asyncio.create_task(run())
+
+    async def cancel_test(self):
+        if self.test_task and not self.test_task.done():
+            self.test_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.test_task
 
     async def test_connection(self, key):
         spec = self.connections.get(key)

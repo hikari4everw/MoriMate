@@ -66,3 +66,53 @@ async def test_usage_unknown_and_purpose_are_preserved(tmp_path):
     assert row['usage'] is None and row['purpose'] == 'memory'
     assert row['space'] == 'guest-1'
     store.close()
+
+
+async def test_configuration_update_closes_generation_until_authorization_is_committed(tmp_path):
+    import threading
+    route, _ = router(tmp_path)
+    route.connections.save({'id': 'cloud', 'provider': 'openai', 'model': 'chosen', 'allow_guests': True})
+    await route.select('cloud:cloud')
+    entered, release = threading.Event(), threading.Event()
+    original = route.connections.save
+    def delayed_save(*args):
+        entered.set()
+        release.wait(2)
+        return original(*args)
+    route.connections.save = delayed_save
+    stopped = []
+    async def stop():
+        stopped.append(True)
+    operation = asyncio.create_task(route.configure({'id': 'cloud', 'provider': 'openai', 'model': 'chosen'}, stop=stop))
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        assert not route.ready and route.phase == 'stopping'
+        with pytest.raises(RuntimeError):
+            await route.bind('guest').complete([])
+    finally:
+        release.set()
+        await operation
+    assert stopped and route.ready and not route.allowed('guest')
+    await route.close()
+
+
+async def test_connection_test_is_scheduled_cancellable_and_does_not_block_controls(tmp_path):
+    from open_llm_vtuber.companion.scheduling import GenerationScheduler
+    route, _ = router(tmp_path)
+    entered = asyncio.Event()
+    async def slow_test(key):
+        entered.set()
+        await asyncio.Event().wait()
+    route.test_connection = slow_test
+    scheduler = GenerationScheduler()
+    messages = []
+    async def send(message):
+        messages.append(message)
+    route.request_test('cloud', scheduler, send)
+    await asyncio.wait_for(entered.wait(), 1)
+    assert scheduler.active is not None
+    await route.cancel_test()
+    assert route.test_task.done() and scheduler.active is None
+    assert any('取消' in item.get('message', '') for item in messages)
+    assert messages[-1] == {'type': 'cloud-test-status', 'running': False}
+    await route.close()

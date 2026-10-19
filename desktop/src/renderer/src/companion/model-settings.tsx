@@ -44,6 +44,7 @@ export function ModelSettings({ send, messages, connected, switching }: {
       <button className="primary" disabled={disabled}>保存连接</button>
     </form>
     {notice && <p role="status">{notice}</p>}
+    {messages['cloud-test-status']?.running && <button onClick={() => send({ type: 'interrupt-signal' })}>停止连接测试</button>}
     <h3>最近用量</h3><p>包括聊天、主动评论、记忆整理和连接测试；中断时服务商可能仍计费。缺少 token 报告显示未知，以服务商账单为准。</p>
     <button onClick={() => send({ type: 'cloud-usage' })}>刷新用量</button>
     {(messages['cloud-usage']?.items || []).map((item: any) => <article key={item.id}><small>{item.created} · {item.space} · {item.purpose} · {item.status}</small><p>{item.usage ? JSON.stringify(item.usage) : 'token 用量未知'}</p></article>)}

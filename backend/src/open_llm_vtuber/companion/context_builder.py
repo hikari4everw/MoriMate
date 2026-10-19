@@ -136,4 +136,4 @@ class ContextBuilder:
                  'source_ids': sorted(ids), 'summary_used': selected_summary is not None,
                  'estimated_tokens': estimated_tokens(messages), 'budget': request.input_budget,
                  'estimate': True, 'dropped_turns': len(turns) - len(selected_turns)}
-        return ContextBundle(messages, sorted(ids), [m['id'] for m in selected_memories], self.store.revision, trace)
+        return ContextBundle(messages, sorted(ids), sorted({m['id'] for m in selected_memories} | set(selected_summary.get('memory_ids', []) if selected_summary else [])), self.store.revision, trace)

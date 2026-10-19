@@ -108,3 +108,52 @@ async def test_failed_maintenance_stays_paused_after_restart(tmp_path):
     assert model.requests == []
     worker.retry()
     assert (await worker.run_batch())['state'] == 'saved'
+
+
+async def test_summary_and_checkpoints_depend_on_manual_memories(tmp_path):
+    store = MemoryStore(tmp_path / 'm.db')
+    source = store.add_source('user', '旧门禁码')
+    item = store.remember('fact', '旧门禁码', [source], '门禁码')
+    revised = store.correct(item, '门禁码秘密123')
+    for _ in range(6):
+        store.add_source('user', '无关聊天')
+    class RepeatsMemory:
+        async def complete(self, messages):
+            assert '秘密123' in messages[1]['content']
+            return json.dumps({'summary': '门禁码秘密123', 'memories': []})
+    await service(store, RepeatsMemory()).run_batch()
+    assert store.summary('daily') and store.checkpoints('daily')
+    store.forget(revised, mode='erase')
+    assert store.summary('daily') is None and store.checkpoints('daily') == []
+
+
+async def test_maintenance_budget_limits_oldest_batch_and_leaves_remainder_pending(tmp_path):
+    from open_llm_vtuber.companion.context_builder import estimated_tokens
+    store = MemoryStore(tmp_path / 'm.db')
+    for i in range(6):
+        store.add_source('user', f'来源{i}' + '长' * 2000)
+    model = Summarizer()
+    worker = service(store, model)
+    result = await worker.run_batch()
+    assert estimated_tokens(model.requests[0]) <= 8000
+    assert 1 <= result['sources'] < 6
+    submitted = json.loads(model.requests[0][1]['content'])['sources']
+    assert [s['id'] for s in submitted] == list(range(1, len(submitted) + 1))
+    await worker.run_batch()
+    assert len(model.requests) == 2  # partial batch remainder must not starve below six
+
+
+async def test_old_summary_cannot_permanently_crowd_out_oldest_pending_source(tmp_path):
+    from open_llm_vtuber.companion.context_builder import estimated_tokens
+    store = MemoryStore(tmp_path / 'm.db')
+    old = store.add_source('user', '旧资料')
+    store.save_summary('daily', '旧' * 1000, [old])
+    store.mark_processed([old])
+    for i in range(6):
+        store.add_source('user', f'新资料{i}' + '长' * 1000)
+    model = Summarizer()
+    model.context_tokens, model.max_output_tokens = 4096, 800
+    result = await service(store, model).run_batch()
+    assert result['state'] == 'saved'
+    assert estimated_tokens(model.requests[0]) <= 2272
+    assert json.loads(model.requests[0][1]['content'])['previous'] is None

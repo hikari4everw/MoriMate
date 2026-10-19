@@ -57,3 +57,15 @@ def test_keychain_failure_is_not_saved_as_plaintext_or_leaked(tmp_path):
         store.save({'id': 'chat', 'provider': 'deepseek', 'model': 'chosen'}, 'secret-token')
     assert 'secret-token' not in str(error.value)
     assert not store.path.exists()
+
+
+def test_connection_views_never_wait_on_keychain(tmp_path):
+    from open_llm_vtuber.companion.connections import ConnectionStore
+    vault = Vault()
+    store = ConnectionStore(tmp_path / 'connections.json', vault)
+    store.save({'id': 'chat', 'provider': 'openai', 'model': 'chosen'}, 'secret')
+    def interactive_get(key):
+        raise AssertionError('a locked Keychain must not be read for listing metadata')
+    vault.get = interactive_get
+    assert store.views()[0]['has_key'] is True
+    assert ConnectionStore(store.path, vault).views()[0]['has_key'] is True

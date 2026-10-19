@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 
 from .memory_types import MemoryCandidate
+from .context_builder import estimated_tokens
 
 INSTRUCTIONS = """从资料提取JSON，不要Markdown：
 {"summary":"中文摘要","memories":[{"kind":"preference/fact/commitment/experience","text":"明确记忆","source_ids":[整数],"evidence":"来源连续原文","previous_id":null,"explicit_change":false,"event_time":null}]}。
@@ -31,25 +32,53 @@ class MemoryMaintenance:
         if self.paused:
             return {'state': 'paused'}
         store = self.store
-        scope = store.db.execute(
-            'SELECT scene FROM sources WHERE epoch=? AND processed=0 AND redacted=0 AND prompt_excluded=0 '
-            'AND (? IS NULL OR scene=?) GROUP BY scene HAVING COUNT(*)>=6 ORDER BY MIN(id) LIMIT 1',
-            (store.epoch, scene, scene)).fetchone()
+        scopes = store.db.execute(
+            'SELECT scene,COUNT(*) AS count FROM sources WHERE epoch=? AND processed=0 AND redacted=0 AND prompt_excluded=0 '
+            'AND (? IS NULL OR scene=?) GROUP BY scene ORDER BY MIN(id)',
+            (store.epoch, scene, scene)).fetchall()
+        scope = next((row for row in scopes if row['count'] >= 6 or store.db.execute(
+            "SELECT 1 FROM profile WHERE key=?", ('_maintenance_drain:' + row['scene'],)).fetchone()), None)
         if not scope:
             return {'state': 'idle'}
         scene = scope['scene']
-        rows = [dict(r) for r in store.db.execute(
+        pending = [dict(r) for r in store.db.execute(
             'SELECT * FROM sources WHERE epoch=? AND scene=? AND processed=0 AND redacted=0 AND prompt_excluded=0 ORDER BY id LIMIT 40',
             (store.epoch, scene))]
         revision = store.revision
         old = store.summary(scene)
         previous = {key: old.get(key) for key in ('text', 'recorded_from', 'recorded_to')} if old else None
-        sources = [{**row, 'recorded_local': datetime.fromisoformat(row['created']).astimezone().isoformat(timespec='seconds')} for row in rows]
-        existing = [{'id': m['id'], 'kind': m['kind'], 'text': m['text']} for m in store.memories() if m['scene'] in {None, scene}][:40]
-        messages = [{'role': 'system', 'content': INSTRUCTIONS}, {'role': 'user', 'content': json.dumps({
-            'previous': previous, 'sources': sources, 'existing_memories': existing, 'current_time': self.current_time(),
-        }, ensure_ascii=False)}]
+        context_tokens = getattr(self.model, 'context_tokens', 32768)
+        output_tokens = min(800, getattr(self.model, 'max_output_tokens', 8192))
+        input_budget = min(8000, context_tokens - output_tokens - 1024)
+        rows, sources, existing = [], [], []
+        now = self.current_time()
+        def build_messages():
+            return [{'role': 'system', 'content': INSTRUCTIONS}, {'role': 'user', 'content': json.dumps({
+                'previous': previous, 'sources': sources, 'existing_memories': existing, 'current_time': now,
+            }, ensure_ascii=False)}]
+        if old and estimated_tokens(build_messages()) > input_budget:
+            old, previous = None, None
+        for row in pending:
+            source = {key: row[key] for key in ('id', 'kind', 'text', 'scene', 'created')}
+            source['recorded_local'] = datetime.fromisoformat(row['created']).astimezone().isoformat(timespec='seconds')
+            sources.append(source)
+            if not rows and old and estimated_tokens(build_messages()) > input_budget:
+                old, previous = None, None
+            if estimated_tokens(build_messages()) > input_budget:
+                sources.pop()
+                break
+            rows.append(row)
+        for memory in store.memories():
+            if memory['scene'] not in {None, scene} or len(existing) >= 40:
+                continue
+            candidate = {key: memory[key] for key in ('id', 'kind', 'text')}
+            existing.append(candidate)
+            if estimated_tokens(build_messages()) > input_budget:
+                existing.pop()
+        messages = build_messages()
         try:
+            if not rows:
+                raise ValueError('最旧单条来源超过整理预算，未发送API；请切换更大上下文模型或增加连接容量后手动重试')
             raw = await self.model.complete(messages)
             result = json.loads(raw)
             if not isinstance(result, dict) or not isinstance(result.get('summary'), str) or not result['summary'].strip() or len(result['summary']) > 3000:
@@ -72,6 +101,7 @@ class MemoryMaintenance:
                 if candidate.previous_id is not None and candidate.previous_id not in {m['id'] for m in existing}:
                     raise ValueError('变化引用了无效的旧记忆')
                 candidates.append(candidate)
+            memory_ids = sorted({m['id'] for m in existing} | set(old.get('memory_ids', []) if old else []))
             ids = sorted(batch_ids | set(json.loads(old['source_ids']) if old else []))
             if store.revision != revision or not store._valid_sources(ids):
                 return {'state': 'stale'}
@@ -79,9 +109,14 @@ class MemoryMaintenance:
                 for candidate in candidates:
                     if store.record_memory(candidate) is None:
                         raise ValueError('记忆缺少有效证据或作用域不匹配')
-                if store.save_summary(scene, result['summary'], ids) is None:
+                if store.save_summary(scene, result['summary'], ids, memory_ids=memory_ids) is None:
                     raise ValueError('摘要来源已失效')
                 store.mark_processed(sorted(batch_ids))
+                key = '_maintenance_drain:' + scene
+                if len(rows) < scope['count']:
+                    store.db.execute("INSERT OR REPLACE INTO profile VALUES(?, '1')", (key,))
+                else:
+                    store.db.execute('DELETE FROM profile WHERE key=?', (key,))
             return {'state': 'saved', 'scene': scene, 'sources': len(rows)}
         except asyncio.CancelledError:
             raise

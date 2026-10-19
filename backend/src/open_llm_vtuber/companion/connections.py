@@ -72,7 +72,8 @@ class ConnectionStore:
         self.path = Path(path)
         self.credentials = credentials if credentials is not None else Keychain()
         raw = json.loads(self.path.read_text()) if self.path.exists() else []
-        self.specs = {item["id"]: ConnectionSpec(**item) for item in raw}
+        self.specs = {item["id"]: ConnectionSpec(**{k: v for k, v in item.items() if k != 'has_key'}) for item in raw}
+        self.configured = {item['id']: item.get('has_key') is True for item in raw}
 
     def get(self, key):
         if key not in self.specs:
@@ -86,21 +87,18 @@ class ConnectionStore:
             raise RuntimeError("无法读取API密钥，请检查钥匙串") from None
         if not value:
             raise RuntimeError("此连接尚未配置API密钥")
+        self.configured[key] = True
         return value
 
     def _write(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(json.dumps([asdict(s) for s in self.specs.values()], ensure_ascii=False, indent=2))
+        temporary.write_text(json.dumps(self.views(), ensure_ascii=False, indent=2))
         temporary.chmod(0o600)
         temporary.replace(self.path)
 
     def view(self, spec):
-        try:
-            configured = bool(self.credentials.get(spec.id))
-        except Exception:
-            configured = False
-        return {**asdict(spec), "has_key": configured}
+        return {**asdict(spec), "has_key": self.configured.get(spec.id, False)}
 
     def views(self):
         return [self.view(spec) for spec in self.specs.values()]
@@ -117,6 +115,7 @@ class ConnectionStore:
                 self.credentials.set(spec.id, api_key.strip())
             except Exception:
                 raise RuntimeError("API密钥未保存：macOS钥匙串不可用") from None
+            self.configured[spec.id] = True
         self.specs[spec.id] = spec
         self._write()
         return self.view(spec)
@@ -128,4 +127,5 @@ class ConnectionStore:
         except Exception:
             raise RuntimeError("无法删除钥匙串凭据，连接未移除") from None
         del self.specs[key]
+        self.configured.pop(key, None)
         self._write()
